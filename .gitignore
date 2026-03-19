@@ -7,3 +7,7 @@ cnn_respiratory_aug_best.pth
 info_compte.txt
 rendu.txt
 mel_spectrograms.npy
+.env
+.env.example
+label_encoder.pkl
+Snowlake_Connexion.ipynb
