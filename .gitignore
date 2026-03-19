@@ -1,5 +1,7 @@
 data/
+data_2/
 data_updated/
+data_4k/
 spectres.npy
 features_dataset.npy
 cnn_respiratory.pth
@@ -11,3 +13,7 @@ mel_spectrograms.npy
 .env.example
 label_encoder.pkl
 Snowflake_connexion.ipynb
+
+Phase3_fine_tuning.ipynb
+phase1.ipynb
+start copy.ipynb
