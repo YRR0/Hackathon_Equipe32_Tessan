@@ -1,5 +1,6 @@
 data/
 data_updated/
+spectres.npy
 info_compte.txt
 rendu.txt
 mel_spectrograms.npy
