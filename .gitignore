@@ -10,4 +10,4 @@ mel_spectrograms.npy
 .env
 .env.example
 label_encoder.pkl
-Snowlake_Connexion.ipynb
+Snowflake_connexion.ipynb
