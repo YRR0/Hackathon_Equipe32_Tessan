@@ -1,7 +1,5 @@
 data/
-data_4k/
 data_updated/
-data_set
 info_compte.txt
 rendu.txt
 mel_spectrograms.npy
