@@ -2,6 +2,7 @@ data/
 data_updated/
 spectres.npy
 features_dataset.npy
+cnn_respiratory.pth
 info_compte.txt
 rendu.txt
 mel_spectrograms.npy
