@@ -1,7 +1,5 @@
 data/
-data_2/
 data_updated/
-data_4k/
 __pycache__
 spectres.npy
 features_dataset.npy
