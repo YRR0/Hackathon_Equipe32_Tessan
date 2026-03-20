@@ -31,7 +31,7 @@ def main():
     # À lancer une première fois si spectres.npy n'existe pas encore
     # app.preprocess()
 
-    app.training(batch_size=16, epochs_head=5, epochs_finetune=10)
+    app.training(batch_size=32, epochs_head=5, epochs_finetune=10)
 
 
 if __name__ == "__main__":
