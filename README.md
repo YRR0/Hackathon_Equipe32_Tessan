@@ -13,3 +13,13 @@ L'objectif de ce projet est de doter le stéthoscope connecté de ces cabines d'
 ## Suivi répartition du travail et avancement:
 
 https://docs.google.com/document/d/1EjFf9Z3SS0-IjFbZyLYTLG_0arUZyKefo2pR4YQaTz8/edit?usp=sharing
+
+## Lancement main
+
+Le CNN simple marche avec :
+
+python main.py --model cnn
+
+Le ResNet marche avec :
+
+python main.py --model resnet
