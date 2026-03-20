@@ -4,34 +4,32 @@ from torchvision import models
 
 
 class ResNet18FineTuned(nn.Module):
-    """
-    ResNet18 pré-entraîné, adapté à 5 classes.
-    """
-
-    def __init__(self, num_classes=5, freeze_backbone=True):
+    def __init__(self, num_classes=5):
         super().__init__()
 
-        # Compatibilité torchvision ancienne / récente
-        try:
-            self.backbone = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-        except Exception:
-            self.backbone = models.resnet18(pretrained=True)
+        self.backbone = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+        self.backbone.conv1 = nn.Conv2d(1, 64, 7, 2, 3, bias=False)
 
-        if freeze_backbone:
-            for param in self.backbone.parameters():
-                param.requires_grad = False
+        # On enlève avgpool et fc
+        self.features = nn.Sequential(*list(self.backbone.children())[:-2])
 
-        in_features = self.backbone.fc.in_features
-        self.backbone.fc = nn.Linear(in_features, num_classes)
+        self.lstm = nn.LSTM(512, 256, bidirectional=True, batch_first=True)
+        self.attn = nn.Linear(512, 1)
+        self.fc = nn.Linear(512, num_classes)
 
     def forward(self, x):
-        return self.backbone(x)
+        x = self.features(x)  # (B, 512, H, W)
 
-    def unfreeze_last_block(self):
-        """
-        Dégèle layer4 + fc pour le vrai fine-tuning.
-        """
-        for param in self.backbone.layer4.parameters():
-            param.requires_grad = True
-        for param in self.backbone.fc.parameters():
-            param.requires_grad = True
+        B, C, H, W = x.shape
+
+        # On considère W = temps
+        x = x.mean(dim=2)        # (B, 512, W)
+        x = x.permute(0, 2, 1)   # (B, W, 512)
+
+        x, _ = self.lstm(x)
+
+        # Attention
+        weights = torch.softmax(self.attn(x), dim=1)
+        x = (x * weights).sum(dim=1)
+
+        return self.fc(x)
