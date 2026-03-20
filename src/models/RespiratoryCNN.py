@@ -48,8 +48,9 @@ class RespiratoryCNN(nn.Module):
         x = self.classifier(x)
         return x
 
-# Vérifier les dimensions (6 canaux : mel, mfcc, centroid, bandwidth, zcr, chroma)
-model = RespiratoryCNN(num_classes=5, in_channels=6)
-dummy = torch.randn(8, 6, 128, 259)   # batch=8, canaux=6, H=128, W=259
-out = model(dummy)
-print(f"Sortie : {out.shape}")
+if __name__ == "__main__":
+    # Vérifier les dimensions (6 canaux : mel, mfcc, centroid, bandwidth, zcr, chroma)
+    model = RespiratoryCNN(num_classes=5, in_channels=6)
+    dummy = torch.randn(8, 6, 128, 259)   # batch=8, canaux=6, H=128, W=259
+    out = model(dummy)
+    print(f"Sortie : {out.shape}")

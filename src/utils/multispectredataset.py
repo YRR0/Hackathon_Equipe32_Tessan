@@ -1,6 +1,8 @@
 import torch
 import torch.nn.functional as F
+import numpy as np
 import cv2
+from torch.utils.data import Dataset
 
 class MultiSpectreDataset(Dataset):
     def __init__(self, spectres, labels, feature_keys=None):
