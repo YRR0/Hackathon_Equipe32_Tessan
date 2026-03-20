@@ -1,5 +1,7 @@
 data/
+data_2/
 data_updated/
+data_4k/
 __pycache__
 spectres.npy
 features_dataset.npy
@@ -14,5 +16,8 @@ label_encoder.pkl
 Snowflake_connexion.ipynb
 
 Phase3_fine_tuning.ipynb
+Phase3_fine_tuning copy.ipynb
 phase1.ipynb
 start copy.ipynb
+diagnostic_gpu.py
+src/models/resnet18_mel_finetuned.pth
