@@ -8,7 +8,7 @@ from pathlib import Path
 from preprocessing import Preprocessor
 from model import Model, MultiSpectreDataset
 from models.RespiratoryCNN import RespiratoryCNN
-
+from models.CNNBILSTMANAttention import CNNBiLSTMAttention
 
 class Main:
     """
@@ -34,10 +34,10 @@ class Main:
 
 def main():
     main = Main()
-    main.preprocess()
+    # main.preprocess()
 
-    model = RespiratoryCNN
-    # main.training(model)
+    model = CNNBiLSTMAttention
+    main.training(model)
 
 if __name__ == "__main__":
     main()
