@@ -36,7 +36,8 @@ def main():
     main = Main()
     # main.preprocess()
 
-    model = CNNBiLSTMAttention
+    #model = CNNBiLSTMAttention
+    model = RespiratoryCNN
     main.training(model)
 
 if __name__ == "__main__":
