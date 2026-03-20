@@ -1,0 +1,190 @@
+'''
+File for using models created in other .py files,
+should be modulable to allow for different preprocessing hyperparameters.
+Requires pre-processed data
+'''
+
+from pathlib import Path
+import numpy as np
+import librosa
+import soundfile as sf
+import pandas as pd
+from scipy import signal as scipy_signal
+import os
+import torch
+import torch.nn as nn
+from sklearn.model_selection import StratifiedShuffleSplit
+from torch.utils.data import Dataset, DataLoader, Subset
+from sklearn.preprocessing import LabelEncoder
+import torch.nn.functional as F
+import cv2
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics import (classification_report, confusion_matrix,
+                              roc_auc_score, f1_score)
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+
+from utils.multispectredataset import MultiSpectreDataset
+
+class Model:
+    '''
+    Class for using the models created in other .py files.
+
+    
+    '''
+    def __init__(self, batch_size=32, num_workers=4, pin_memory=True, feature_keys=None):
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.pin_memory = pin_memory
+        self.feature_keys = feature_keys
+
+    def load_data(self, data_root):
+        # Chargement des données depuis le fichier unifié
+        self.spectres = np.load("spectres.npy", allow_pickle=True).item()
+        self.mels = self.spectres["mel"]
+        self.labels = self.spectres["labels"]
+
+        assert len(self.mels) == len(self.labels), "Désalignement entre mels et labels dans spectres.npy"
+        # Encodage des labels en entiers
+        self.le = LabelEncoder()
+        self.y_enc = self.le.fit_transform(self.labels)  # ex: asthma->0, bronchial->1...
+        # print("Classes :", self.le.classes_)
+
+        indices = np.arange(len(self.mels))
+        sss1 = StratifiedShuffleSplit(n_splits=1, test_size=0.30, random_state=42)
+        self.train_idx, temp_idx = next(sss1.split(indices, self.y_enc))
+        sss2 = StratifiedShuffleSplit(n_splits=1, test_size=0.50, random_state=42)
+        self.val_idx, self.test_idx = next(sss2.split(temp_idx, self.y_enc[temp_idx]))
+        self.val_idx = temp_idx[self.val_idx]
+        self.test_idx = temp_idx[self.test_idx]
+
+        print(f"Train : {len(self.train_idx)} | Val : {len(self.val_idx)} | Test : {len(self.test_idx)}")
+
+
+
+    def data_loader(self, batch_size=None, num_workers=None, pin_memory=None, feature_keys=None):
+        '''
+        feature_keys donne la liste des canaux a utiliser
+        feature_keys [list] : "mel", "mfcc", "centroid", "bandwidth", "zcr", "chroma"
+        '''
+        self.full_dataset = MultiSpectreDataset(self.spectres, self.y_enc, feature_keys=feature_keys)
+        print(f"Canaux utilisés : {self.full_dataset.feature_keys}")
+        print(f"Nombre de canaux : {self.full_dataset.num_channels}")
+
+        self.train_loader = DataLoader(Subset(self.full_dataset, self.train_idx), batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=self.pin_memory)
+        self.val_loader   = DataLoader(Subset(self.full_dataset, self.val_idx), batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=self.pin_memory)
+        self.test_loader  = DataLoader(Subset(self.full_dataset, self.test_idx), batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=self.pin_memory)
+
+    
+    def train(self, CNN_model, epochs=50, save_model=True):
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Device utilisé : {device}")
+
+        # Calcul des poids pour compenser le déséquilibre (Q2)
+        class_weights = compute_class_weight(
+            class_weight='balanced',
+            classes=np.unique(self.y_enc),
+            y=self.y_enc[self.train_idx]        # calculé sur le train seulement
+        )
+        weights_tensor = torch.FloatTensor(class_weights)
+
+        model = CNN_model(
+            num_classes=len(self.le.classes_),
+            in_channels=self.full_dataset.num_channels
+        ).to(device)
+        weights_tensor = weights_tensor.to(device)
+        criterion = nn.CrossEntropyLoss(weight=weights_tensor)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, patience=5, factor=0.5
+        )
+
+        def train_epoch(model, loader, criterion, optimizer):
+            model.train()
+            total_loss, correct = 0, 0
+            for X_batch, y_batch in loader:
+                X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+                optimizer.zero_grad()
+                out = model(X_batch)
+                loss = criterion(out, y_batch)
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+                correct += (out.argmax(1) == y_batch).sum().item()
+            return total_loss / len(loader), correct / len(loader.dataset)
+
+        def eval_epoch(model, loader, criterion):
+            model.eval()
+            total_loss, correct = 0, 0
+            with torch.no_grad():
+                for X_batch, y_batch in loader:
+                    X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+                    out = model(X_batch)
+                    loss = criterion(out, y_batch)
+                    total_loss += loss.item()
+                    correct += (out.argmax(1) == y_batch).sum().item()
+            return total_loss / len(loader), correct / len(loader.dataset)
+
+        # Entraînement
+        EPOCHS = epochs
+        for epoch in range(EPOCHS):
+            train_loss, train_acc = train_epoch(model, self.train_loader, criterion, optimizer)
+            val_loss, val_acc = eval_epoch(model, self.val_loader, criterion)
+            scheduler.step(val_loss)
+
+            if (epoch + 1) % 5 == 0:
+                print(
+                    f"Epoch {epoch+1:3d} | "
+                    f"Train loss {train_loss:.3f} acc {train_acc:.3f} | "
+                    f"Val loss {val_loss:.3f} acc {val_acc:.3f}"
+                )
+
+        if save_model:
+            torch.save(model.state_dict(), "cnn_respiratory.pth")
+
+    def evaluate(self, CNN_model, model_path="cnn_respiratory.pth"):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = CNN_model(
+            num_classes=len(self.le.classes_),
+            in_channels=self.full_dataset.num_channels
+        ).to(device)
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.eval()
+
+        all_preds, all_probs, all_true = [], [], []
+        with torch.no_grad():
+            for X_batch, y_batch in self.test_loader:
+                out   = model(X_batch)
+                probs = torch.softmax(out, dim=1)
+                all_preds.extend(out.argmax(1).numpy())
+                all_probs.extend(probs.numpy())
+                all_true.extend(y_batch.numpy())
+        all_preds = np.array(all_preds)
+        all_probs = np.array(all_probs)
+        all_true  = np.array(all_true)
+
+        print(classification_report(all_true, all_preds,
+                                    target_names=self.le.classes_))
+
+        f1_macro = f1_score(all_true, all_preds, average='macro')
+        print(f"Macro F1-score : {f1_macro:.3f}")
+
+        auc = roc_auc_score(all_true, all_probs, multi_class='ovr', average='macro')
+        print(f"Macro AUC-ROC  : {auc:.3f}")
+
+        cm = confusion_matrix(all_true, all_preds)
+        plt.figure(figsize=(7, 6))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                    xticklabels=self.le.classes_,
+                    yticklabels=self.le.classes_)
+        plt.title("Matrice de confusion — test set")
+        plt.ylabel("Réel")
+        plt.xlabel("Prédit")
+        plt.tight_layout()
+        plt.show()
+
+    def grid_search(self, CNN_model, param_grid):
+        # À implémenter : entraînement de plusieurs modèles avec différentes combinaisons d'hyperparamètres
+        pass
