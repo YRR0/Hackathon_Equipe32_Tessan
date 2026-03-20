@@ -40,7 +40,7 @@ class Model:
         self.verbose = verbose
 
         self.criterion = nn.CrossEntropyLoss
-        self.optimizer = torch.optim.Adam
+        self.optimizer = torch.optim.AdamW
 
     def load_data(self):
         # Chargement des données depuis le fichier unifié
@@ -261,50 +261,62 @@ class Model:
         feature_sets=None,
         dropout_values=None,
         base_model_kwargs=None,
+        preprocessing_params_list=None,
+        preprocess_fn=None,
     ):
         # Recherche exhaustive simple sur les combinaisons d'hyperparamètres.
         optimizer_kwargs_list = optimizer_kwargs_list or [{}]
         feature_sets = feature_sets or [None]
         dropout_values = dropout_values or [None]
         base_model_kwargs = base_model_kwargs or {}
+        preprocessing_params_list = preprocessing_params_list or [None]
         best_result = None
         all_results = []
 
-        for crit in criterions:
-            for opt in optimizers:
-                for lr_val in lr_values:
-                    for opt_kwargs in optimizer_kwargs_list:
-                        for feature_keys in feature_sets:
-                            for dropout in dropout_values:
-                                run_model_kwargs = dict(base_model_kwargs)
-                                if dropout is not None:
-                                    run_model_kwargs["dropout"] = dropout
+        for preprocessing_params in preprocessing_params_list:
+            if preprocess_fn is not None:
+                preprocess_kwargs = preprocessing_params or {}
+                if self.verbose:
+                    print(f"Regenerating preprocessing with params={preprocess_kwargs}")
+                preprocess_fn(preprocess_kwargs)
 
-                                print(
-                                    f"Testing criterion={crit.__name__}, optimizer={opt.__name__}, "
-                                    f"lr={lr_val}, opt_kwargs={opt_kwargs}, "
-                                    f"feature_keys={feature_keys}, dropout={dropout}"
-                                )
-                                train_result = self.train(
-                                    CNN_model,
-                                    epochs=epochs,
-                                    save_model=False,
-                                    criterion_cls=crit,
-                                    optimizer_cls=opt,
-                                    lr=lr_val,
-                                    optimizer_kwargs=opt_kwargs,
-                                    feature_keys=feature_keys,
-                                    model_kwargs=run_model_kwargs,
-                                )
-                                test_acc = self.evaluate(short=True)
-                                result = {
-                                    **train_result,
-                                    "test_acc": test_acc,
-                                }
-                                all_results.append(result)
+            for crit in criterions:
+                for opt in optimizers:
+                    for lr_val in lr_values:
+                        for opt_kwargs in optimizer_kwargs_list:
+                            for feature_keys in feature_sets:
+                                for dropout in dropout_values:
+                                    run_model_kwargs = dict(base_model_kwargs)
+                                    if dropout is not None:
+                                        run_model_kwargs["dropout"] = dropout
 
-                                if best_result is None or result["best_val_acc"] > best_result["best_val_acc"]:
-                                    best_result = result
+                                    print(
+                                        f"Testing preprocess={preprocessing_params}, "
+                                        f"criterion={crit.__name__}, optimizer={opt.__name__}, "
+                                        f"lr={lr_val}, opt_kwargs={opt_kwargs}, "
+                                        f"feature_keys={feature_keys}, dropout={dropout}"
+                                    )
+                                    train_result = self.train(
+                                        CNN_model,
+                                        epochs=epochs,
+                                        save_model=False,
+                                        criterion_cls=crit,
+                                        optimizer_cls=opt,
+                                        lr=lr_val,
+                                        optimizer_kwargs=opt_kwargs,
+                                        feature_keys=feature_keys,
+                                        model_kwargs=run_model_kwargs,
+                                    )
+                                    test_acc = self.evaluate(short=True)
+                                    result = {
+                                        **train_result,
+                                        "preprocessing_params": preprocessing_params or {},
+                                        "test_acc": test_acc,
+                                    }
+                                    all_results.append(result)
+
+                                    if best_result is None or result["best_val_acc"] > best_result["best_val_acc"]:
+                                        best_result = result
 
         print("\nBest configuration:")
         print(best_result)
