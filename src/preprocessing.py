@@ -20,21 +20,22 @@ class Preprocessor:
     Need to call function spectres_creation_and_save().
     '''
     def __init__(self,target_sr=22050,target_duration_sec=6,input_root="data",
-                    n_fft=2048, hop_length=512, n_mels=128, n_mfcc=20):
+                    n_fft=2048, hop_length=512, n_mels=128, n_mfcc=20, verbose=False):
         
         self.target_sr = target_sr
         self.target_duration_sec = target_duration_sec
-        self.input_root = input_root
+        self.input_root = Path(input_root)
 
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.n_mels = n_mels
         self.n_mfcc = n_mfcc
+        self.verbose = verbose
 
 
     def preprocess_audio_dataset(self, target_sr: int, target_duration_sec: float, input_root: str = "data"):
         input_root = Path(input_root)
-        output_root = Path(f"data_updated")
+        output_root = input_root.parent / "data_updated"
         output_root.mkdir(parents=True, exist_ok=True)
 
         target_samples = int(target_sr * target_duration_sec)
@@ -74,6 +75,20 @@ class Preprocessor:
 
         fix_duration_df = pd.DataFrame(rows)
         return fix_duration_df, output_root
+
+    def preprocess_audio_file(self, wav_path, target_sr: int, target_duration_sec: float):
+        """Load one wav file and force a fixed duration."""
+        target_samples = int(target_sr * target_duration_sec)
+        y, _ = librosa.load(str(wav_path), sr=target_sr, mono=True)
+
+        if len(y) == 0:
+            return np.zeros(target_samples, dtype=np.float32)
+        if len(y) < target_samples:
+            repeats = int(np.ceil(target_samples / len(y)))
+            return np.tile(y, repeats)[:target_samples]
+        if len(y) > target_samples:
+            return y[:target_samples]
+        return y
 
     def compute_mel_spectrogram(self, y, sr=22050):
         mel = librosa.feature.melspectrogram(
@@ -131,7 +146,7 @@ class Preprocessor:
         return y_filtered
 
 
-    def extract_all_features(y, sr=22050):
+    def extract_all_features(self, y, sr=22050):
         features = {}
         # MFCC — 13 coefficients qui résument l'enveloppe spectrale
         mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
@@ -161,7 +176,11 @@ class Preprocessor:
         return features  # dict de ~32 valeurs numériques
     
         
-    def spectres_creation_and_save(self, target_sr=22050, target_duration_sec=6, input_root=None):
+    def spectres_creation_and_save(self):
+        '''
+        Creates the spectres and saves them in spectres.npy
+        Uses classes parameters
+        '''
         all_features = []
         all_mels = []
         all_mfccs = []
@@ -170,21 +189,35 @@ class Preprocessor:
         all_zcrs = []
         all_chromas = []
         all_labels = []
-        for label in os.listdir(input_root):
-            folder = os.path.join(input_root, label)
-            if not os.path.isdir(folder):
+        if self.verbose:
+            print("Normalizing dataset to fixed duration...")
+        fix_duration_df, processed_root = self.preprocess_audio_dataset(
+            self.target_sr,
+            self.target_duration_sec,
+            self.input_root,
+        )
+
+        csv_dir = Path("csv")
+        csv_dir.mkdir(parents=True, exist_ok=True)
+        # fix_duration_df.to_csv(csv_dir / "fix_duration_report.csv", index=False)
+
+        if self.verbose:
+            print("Computing spectrograms")
+
+        for label_dir in processed_root.iterdir():
+            if not label_dir.is_dir():
                 continue
+            label = label_dir.name
 
-            for wav_file in os.listdir(folder):
-                if not wav_file.endswith(".wav"):
+            for wav_path in label_dir.glob("*.wav"):
+                if wav_path.suffix.lower() != ".wav":
                     continue
-
-                filepath = os.path.join(folder, wav_file)
+                wav_file = wav_path.name
 
                 try:
-                    y = self.preprocess_audio_dataset(target_sr, target_duration_sec, filepath)
-                    y_clean = self.apply_bandpass_filter(y, sr=target_sr)
-
+                    y, _ = librosa.load(str(wav_path), sr=self.target_sr, mono=True)
+                    y_clean = self.apply_bandpass_filter(y, sr=self.target_sr)
+                    
                     mel = self.compute_mel_spectrogram(y_clean)
                     all_mels.append(mel)
                     mfcc = self.compute_mfcc_spectrogram(y_clean)
@@ -207,3 +240,19 @@ class Preprocessor:
 
                 except Exception as e:
                     print(f"Erreur sur {wav_file} : {e}")
+
+        spectres = {
+            "mel": all_mels,
+            "mfcc": all_mfccs,
+            "centroid": all_centroids,
+            "bandwidth": all_bandwidths,
+            "zcr": all_zcrs,
+            "chroma": all_chromas,
+            "labels": all_labels,
+        }
+        np.save("spectres.npy", spectres, allow_pickle=True)
+
+        # pd.DataFrame(all_features).to_csv(csv_dir / "features_dataset.csv", index=False)
+
+        if self.verbose:
+            print(f"Saved {len(all_labels)} samples to spectres.npy")

@@ -30,7 +30,6 @@ from utils.multispectredataset import MultiSpectreDataset
 class Model:
     '''
     Class for using the models created in other .py files.
-
     
     '''
     def __init__(self, batch_size=32, num_workers=4, pin_memory=True, feature_keys=None):
@@ -39,9 +38,9 @@ class Model:
         self.pin_memory = pin_memory
         self.feature_keys = feature_keys
 
-    def load_data(self, data_root):
+    def load_data(self):
         # Chargement des données depuis le fichier unifié
-        self.spectres = np.load("spectres.npy", allow_pickle=True).item()
+        self.spectres = np.load("spectres.npy", allow_pickle=True).item() # MAYBE MODIF AVC NEW FORMAT
         self.mels = self.spectres["mel"]
         self.labels = self.spectres["labels"]
 
@@ -49,7 +48,12 @@ class Model:
         # Encodage des labels en entiers
         self.le = LabelEncoder()
         self.y_enc = self.le.fit_transform(self.labels)  # ex: asthma->0, bronchial->1...
-        # print("Classes :", self.le.classes_)
+        
+        # # Print label -> code mapping
+        # print("\nLabel -> Code mapping:")
+        # for i, label in enumerate(self.le.classes_):
+        #     print(f"  {label} -> {i}")
+        # print()
 
         indices = np.arange(len(self.mels))
         sss1 = StratifiedShuffleSplit(n_splits=1, test_size=0.30, random_state=42)
@@ -80,7 +84,11 @@ class Model:
     def train(self, CNN_model, epochs=50, save_model=True):
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Device utilisé : {device}")
+        print(f"Device utilisee : {device}")
+
+        # Load des data
+        self.load_data()
+        self.data_loader()
 
         # Calcul des poids pour compenser le déséquilibre (Q2)
         class_weights = compute_class_weight(
@@ -142,9 +150,9 @@ class Model:
                 )
 
         if save_model:
-            torch.save(model.state_dict(), "cnn_respiratory.pth")
+            torch.save(model.state_dict(), "models/cnn_respiratory.pth")
 
-    def evaluate(self, CNN_model, model_path="cnn_respiratory.pth"):
+    def evaluate(self, CNN_model, model_path="models/cnn_respiratory.pth"):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = CNN_model(
             num_classes=len(self.le.classes_),
