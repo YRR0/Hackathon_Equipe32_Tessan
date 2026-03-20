@@ -86,6 +86,12 @@ class Model:
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Device utilisee : {device}")
+        
+        # Optimisations pour CPU
+        if device.type == "cpu":
+            torch.set_num_threads(8)  # Utiliser tous les CPU cores disponibles
+            torch.set_num_interop_threads(1)
+            print(f"CPU threads: {torch.get_num_threads()}")
 
         # Load des data
         self.load_data()
