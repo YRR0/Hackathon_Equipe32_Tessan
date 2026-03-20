@@ -13,7 +13,7 @@ class CNNBiLSTMAttention(nn.Module):
     - Attention: pondère les frames temporelles les plus discriminantes
     """
 
-    def __init__(self, num_classes=5, in_channels=6):
+    def __init__(self, num_classes=5, in_channels=6, dropout=0.25):
         super().__init__()
 
         # ── Bloc CNN — extraction de features spatiales ───────────
@@ -23,21 +23,21 @@ class CNNBiLSTMAttention(nn.Module):
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.MaxPool2d(2, 2),        # (6,128,259) → (32,64,129)
-            nn.Dropout2d(0.25),
+            nn.Dropout2d(dropout),
 
             # Bloc 2
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.MaxPool2d(2, 2),        # (32,64,129) → (64,32,64)
-            nn.Dropout2d(0.25),
+            nn.Dropout2d(dropout),
 
             # Bloc 3
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.MaxPool2d((2, 1)),      # (64,32,64) → (128,16,64)
-            nn.Dropout2d(0.25)
+            nn.Dropout2d(dropout)
         )
 
         # ── BiLSTM — capture des patterns temporels ───────────────
@@ -49,7 +49,7 @@ class CNNBiLSTMAttention(nn.Module):
             num_layers=2,
             batch_first=True,
             bidirectional=True,       # → sortie : (batch, time, 256)
-            dropout=0.3
+            dropout=dropout
         )
 
         # ── Attention — pondération temporelle ────────────────────
@@ -64,7 +64,7 @@ class CNNBiLSTMAttention(nn.Module):
         self.classifier = nn.Sequential(
             nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Dropout(0.5),
+            nn.Dropout(dropout),
             nn.Linear(128, num_classes)
         )
 

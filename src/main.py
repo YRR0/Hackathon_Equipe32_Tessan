@@ -9,6 +9,7 @@ from preprocessing import Preprocessor
 from model import Model, MultiSpectreDataset
 from models.RespiratoryCNN import RespiratoryCNN
 from models.CNNBILSTMANAttention import CNNBiLSTMAttention
+import torch.nn as nn
 
 class Main:
     """
@@ -25,19 +26,47 @@ class Main:
         preprocessor.spectres_creation_and_save()
 
     def training(self, model):
-        model_class = Model(batch_size=1, num_workers=0, pin_memory=True)
-        model_class.train(model, epochs=2, save_model=True)
+        model_class = Model(batch_size=16, num_workers=0, pin_memory=True)
+        model_class.train(model, epochs=50, save_model=True)
         print("Evaluation")
-        model_class.evaluate()
+        model_class.evaluate()        
 
 
 
 def main():
     main = Main()
+
     # main.preprocess()
 
     model = CNNBiLSTMAttention
-    main.training(model)
+    # main.training(model)
+    
+    model_class = Model(batch_size=16, num_workers=0, pin_memory=True)
+    model_class.grid_search(
+        model,
+        lr_values=[1e-3, 1e-4],
+        optimizers=[torch.optim.AdamW],
+        criterions=[nn.CrossEntropyLoss],
+        epochs=20,
+        feature_sets=[
+            ["mel"],
+            ["mel", "mfcc"],
+            ["mel", "mfcc", "chroma"],
+        ],
+        dropout_values=[0.2, 0.3, 0.5],
+        optimizer_kwargs_list=[{}, {"weight_decay": 1e-4}],
+    )
+
 
 if __name__ == "__main__":
     main()
+
+# Base model
+# Best configuration:
+# {'best_val_acc': 0.7417582417582418, 'best_val_loss': 0.7318346525231997, 'criterion': 'CrossEntropyLoss', 'optimizer': 'AdamW', 'lr': 0.001, 'optimizer_kwargs': {'weight_decay': 0.0001}, 'feature_keys': ['mel', 'mfcc', 'chroma'], 'model_kwargs': {'dropout': 0.2}, 
+# 'test_acc': 0.7692307692307693}
+
+# Tsiory :
+# Best configuration:
+# {'best_val_acc': 0.8186813186813187, 'best_val_loss': 0.5334082990884781, 'criterion': 'CrossEntropyLoss', 'optimizer': 'AdamW', 'lr': 0.001, 'optimizer_kwargs': {'weight_decay': 0.0001}, 'feature_keys': ['mel', 'mfcc', 'chroma'], 'model_kwargs': {'dropout': 0.2},
+# 'test_acc': 0.7802197802197802}

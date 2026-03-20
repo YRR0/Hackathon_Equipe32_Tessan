@@ -3,8 +3,7 @@ data_updated/
 __pycache__
 spectres.npy
 features_dataset.npy
-cnn_respiratory.pth
-cnn_respiratory_aug_best.pth
+*.pth
 info_compte.txt
 rendu.txt
 mel_spectrograms.npy

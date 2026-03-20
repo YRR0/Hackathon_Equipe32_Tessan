@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 class RespiratoryCNN(nn.Module):
-    def __init__(self, num_classes=5, in_channels=6):
+    def __init__(self, num_classes=5, in_channels=6, dropout=0.25):
         super().__init__()
 
         # Bloc 1 — détecte les patterns simples (bords, textures)
@@ -11,7 +11,7 @@ class RespiratoryCNN(nn.Module):
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.MaxPool2d(2, 2),      # 128×259 → 64×129
-            nn.Dropout2d(0.25)
+            nn.Dropout2d(dropout)
         )
 
         # Bloc 2 — détecte les patterns plus complexes
@@ -20,7 +20,7 @@ class RespiratoryCNN(nn.Module):
             nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.MaxPool2d(2, 2),      # 64×129 → 32×64
-            nn.Dropout2d(0.25)
+            nn.Dropout2d(dropout)
         )
 
         # Bloc 3 — patterns de haut niveau
@@ -29,7 +29,7 @@ class RespiratoryCNN(nn.Module):
             nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.AdaptiveAvgPool2d((4, 4)),  # → 128×4×4 = 2048 features
-            nn.Dropout2d(0.25)
+            nn.Dropout2d(dropout)
         )
 
         # Classifieur final
@@ -37,7 +37,7 @@ class RespiratoryCNN(nn.Module):
             nn.Flatten(),
             nn.Linear(128 * 4 * 4, 256),
             nn.ReLU(),
-            nn.Dropout(0.5),
+            nn.Dropout(dropout),
             nn.Linear(256, num_classes)
         )
 
