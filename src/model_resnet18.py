@@ -1,4 +1,5 @@
 from pathlib import Path
+from itertools import product
 import numpy as np
 import torch
 import torch.nn as nn
@@ -53,6 +54,19 @@ class ResNet18Trainer:
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.pin_memory = pin_memory
+        self.train_aug_params = {
+            "gaussian_noise_std": 0.01,
+            "time_shift_max": 12,
+            "pitch_shift_max": 4,
+            "num_time_masks": 1,
+            "num_freq_masks": 1,
+            "time_mask_max": 20,
+            "freq_mask_max": 8,
+        }
+
+    @staticmethod
+    def _log(msg):
+        print(msg, flush=True)
 
     def load_data(self):
         data_file = Path(__file__).resolve().parent.parent / "data" / "spectres.npy"
@@ -77,13 +91,26 @@ class ResNet18Trainer:
         self.val_idx = temp_idx[val_sub_idx]
         self.test_idx = temp_idx[test_sub_idx]
 
-        print(f"Train : {len(self.train_idx)} | Val : {len(self.val_idx)} | Test : {len(self.test_idx)}")
+        self._log(f"Train : {len(self.train_idx)} | Val : {len(self.val_idx)} | Test : {len(self.test_idx)}")
 
     def build_loaders(self):
-        self.full_dataset = MelResNetDataset(self.spectres, self.y_enc, target_size=(224, 224))
+        train_aug = dict(self.train_aug_params)
+        self.train_dataset = MelResNetDataset(
+            self.spectres,
+            self.y_enc,
+            target_size=(224, 224),
+            augment=True,
+            **train_aug,
+        )
+        self.eval_dataset = MelResNetDataset(
+            self.spectres,
+            self.y_enc,
+            target_size=(224, 224),
+            augment=False,
+        )
 
         self.train_loader = DataLoader(
-            Subset(self.full_dataset, self.train_idx),
+            Subset(self.train_dataset, self.train_idx),
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
@@ -91,7 +118,7 @@ class ResNet18Trainer:
         )
 
         self.val_loader = DataLoader(
-            Subset(self.full_dataset, self.val_idx),
+            Subset(self.eval_dataset, self.val_idx),
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
@@ -99,7 +126,7 @@ class ResNet18Trainer:
         )
 
         self.test_loader = DataLoader(
-            Subset(self.full_dataset, self.test_idx),
+            Subset(self.eval_dataset, self.test_idx),
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
@@ -188,24 +215,40 @@ class ResNet18Trainer:
 
         print(f"Modèle ONNX exporté dans {model_file}")
 
-    def train(self, epochs_head=5, epochs_finetune=10, save_model=True):
+    def train(
+        self,
+        epochs_head=5,
+        epochs_finetune=10,
+        save_model=True,
+        use_class_weights=True,
+        lr_head=1e-3,
+        lr_finetune=1e-4,
+        weight_decay_head=0.0,
+        weight_decay_finetune=0.0,
+        scheduler_patience=3,
+        scheduler_factor=0.5,
+        log_prefix="",
+    ):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Device utilisée : {device}")
+        self._log(f"{log_prefix}Device utilisée : {device}")
 
         if device.type == "cpu":
             torch.set_num_threads(8)
             torch.set_num_interop_threads(1)
-            print(f"CPU threads: {torch.get_num_threads()}")
+            self._log(f"{log_prefix}CPU threads: {torch.get_num_threads()}")
 
         self.load_data()
         self.build_loaders()
 
-        class_weights = compute_class_weight(
-            class_weight="balanced",
-            classes=np.unique(self.y_enc),
-            y=self.y_enc[self.train_idx]
-        )
-        weights_tensor = torch.FloatTensor(class_weights).to(device)
+        weights_tensor = None
+        if use_class_weights:
+            class_weights = compute_class_weight(
+                class_weight="balanced",
+                classes=np.unique(self.y_enc),
+                y=self.y_enc[self.train_idx]
+            )
+            weights_tensor = torch.FloatTensor(class_weights).to(device)
+            self._log(f"{log_prefix}Class weights: {np.round(class_weights, 3)}")
 
         self.model = ResNet18FineTuned(
             num_classes=len(self.le.classes_),
@@ -213,15 +256,19 @@ class ResNet18Trainer:
         ).to(device)
 
         criterion = nn.CrossEntropyLoss(weight=weights_tensor)
+        best_val_acc = 0.0
+        best_val_loss = float("inf")
+        history = []
 
         # Phase 1 : entraînement de la tête uniquement
-        print("\n=== Phase 1 : entraînement de la tête ===")
+        self._log(f"\n{log_prefix}=== Phase 1 : entraînement de la tête ===")
         optimizer = torch.optim.Adam(
             filter(lambda p: p.requires_grad, self.model.parameters()),
-            lr=1e-3
+            lr=lr_head,
+            weight_decay=weight_decay_head,
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, patience=3, factor=0.5
+            optimizer, patience=scheduler_patience, factor=scheduler_factor
         )
 
         for epoch in range(epochs_head):
@@ -229,22 +276,33 @@ class ResNet18Trainer:
             val_loss, val_acc = self._eval_epoch(self.model, self.val_loader, criterion, device)
             scheduler.step(val_loss)
 
-            print(
-                f"[HEAD] Epoch {epoch+1:02d} | "
+            self._log(
+                f"{log_prefix}[HEAD] Epoch {epoch+1:02d} | "
                 f"Train loss {train_loss:.3f} acc {train_acc:.3f} | "
                 f"Val loss {val_loss:.3f} acc {val_acc:.3f}"
             )
+            best_val_acc = max(best_val_acc, val_acc)
+            best_val_loss = min(best_val_loss, val_loss)
+            history.append({
+                "phase": "head",
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "train_acc": train_acc,
+                "val_loss": val_loss,
+                "val_acc": val_acc,
+            })
 
         # Phase 2 : fine-tuning de layer4 + fc
-        print("\n=== Phase 2 : fine-tuning de layer4 + fc ===")
+        self._log(f"\n{log_prefix}=== Phase 2 : fine-tuning de layer4 + fc ===")
         self.model.unfreeze_last_block()
 
         optimizer = torch.optim.Adam(
             filter(lambda p: p.requires_grad, self.model.parameters()),
-            lr=1e-4
+            lr=lr_finetune,
+            weight_decay=weight_decay_finetune,
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, patience=3, factor=0.5
+            optimizer, patience=scheduler_patience, factor=scheduler_factor
         )
 
         for epoch in range(epochs_finetune):
@@ -252,19 +310,157 @@ class ResNet18Trainer:
             val_loss, val_acc = self._eval_epoch(self.model, self.val_loader, criterion, device)
             scheduler.step(val_loss)
 
-            print(
-                f"[FT] Epoch {epoch+1:02d} | "
+            self._log(
+                f"{log_prefix}[FT] Epoch {epoch+1:02d} | "
                 f"Train loss {train_loss:.3f} acc {train_acc:.3f} | "
                 f"Val loss {val_loss:.3f} acc {val_acc:.3f}"
             )
+            best_val_acc = max(best_val_acc, val_acc)
+            best_val_loss = min(best_val_loss, val_loss)
+            history.append({
+                "phase": "finetune",
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "train_acc": train_acc,
+                "val_loss": val_loss,
+                "val_acc": val_acc,
+            })
 
         if save_model:
             model_file = Path(__file__).resolve().parent / "models" / "resnet18_mel_finetuned.pth"
             model_file.parent.mkdir(parents=True, exist_ok=True)
             torch.save(self.model.state_dict(), model_file)
-            print(f"Modèle sauvegardé dans {model_file}")
+            self._log(f"{log_prefix}Modèle sauvegardé dans {model_file}")
 
             self.export_onnx(onnx_path="models/resnet18_mel_finetuned.onnx")
+
+        return {
+            "best_val_acc": best_val_acc,
+            "best_val_loss": best_val_loss,
+            "last_train_acc": history[-1]["train_acc"] if history else None,
+            "last_val_acc": history[-1]["val_acc"] if history else None,
+            "history": history,
+        }
+
+    @staticmethod
+    def _expand_param_grid(param_grid):
+        keys = list(param_grid.keys())
+        values = [param_grid[k] for k in keys]
+        for combo in product(*values):
+            yield dict(zip(keys, combo))
+
+    def grid_search(
+        self,
+        param_grid,
+        metric="best_val_acc",
+        maximize=True,
+        save_results=True,
+        results_path="models/resnet18_grid_search_results.csv",
+        max_trials=None,
+        random_state=42,
+    ):
+        if not isinstance(param_grid, dict) or len(param_grid) == 0:
+            raise ValueError("param_grid doit être un dict non vide de listes de valeurs.")
+
+        for key, value in param_grid.items():
+            if not isinstance(value, (list, tuple)) or len(value) == 0:
+                raise ValueError(f"param_grid['{key}'] doit être une liste/tuple non vide.")
+
+        model_dir = Path(__file__).resolve().parent / "models"
+        model_dir.mkdir(parents=True, exist_ok=True)
+
+        original_batch_size = self.batch_size
+        original_aug_params = dict(self.train_aug_params)
+
+        results = []
+        best_score = -np.inf if maximize else np.inf
+        best_result = None
+
+        combinations = list(self._expand_param_grid(param_grid))
+        if max_trials is not None and max_trials > 0 and len(combinations) > max_trials:
+            rng = np.random.default_rng(random_state)
+            sampled_idx = rng.choice(len(combinations), size=max_trials, replace=False)
+            combinations = [combinations[i] for i in sampled_idx]
+            self._log(f"Sous-échantillonnage grid search: {max_trials} combinaisons retenues")
+        self._log(f"\nGrid search: {len(combinations)} combinaisons à tester")
+
+        for idx, params in enumerate(combinations, start=1):
+            self._log(f"\n--- Combo {idx}/{len(combinations)} ---")
+            self._log(str(params))
+
+            train_kwargs = dict(params)
+
+            if "batch_size" in train_kwargs:
+                self.batch_size = train_kwargs.pop("batch_size")
+
+            aug_keys = {
+                "gaussian_noise_std",
+                "time_shift_max",
+                "pitch_shift_max",
+                "num_time_masks",
+                "num_freq_masks",
+                "time_mask_max",
+                "freq_mask_max",
+            }
+            current_aug = dict(original_aug_params)
+            for key in list(train_kwargs.keys()):
+                if key in aug_keys:
+                    current_aug[key] = train_kwargs.pop(key)
+            self.train_aug_params = current_aug
+
+            train_kwargs["save_model"] = False
+
+            try:
+                run_metrics = self.train(
+                    **train_kwargs,
+                    log_prefix=f"[GS {idx}/{len(combinations)}] ",
+                )
+                score = run_metrics.get(metric)
+                row = {**params, **run_metrics, "score": score}
+                results.append(row)
+
+                if score is None:
+                    self._log(f"Metric '{metric}' absente pour cette combinaison.")
+                else:
+                    is_better = score > best_score if maximize else score < best_score
+                    if is_better:
+                        best_score = score
+                        best_result = row
+                        self._log(f"[GS] Nouveau meilleur score {best_score:.4f} avec combo {idx}")
+            except Exception as e:
+                row = {**params, "error": str(e), "score": None}
+                results.append(row)
+                self._log(f"Erreur sur la combinaison {idx}: {e}")
+            finally:
+                self.batch_size = original_batch_size
+                self.train_aug_params = dict(original_aug_params)
+
+        if save_results and len(results) > 0:
+            output_file = Path(results_path)
+            if not output_file.is_absolute():
+                output_file = Path(__file__).resolve().parent / output_file
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+
+            all_keys = set()
+            for row in results:
+                all_keys.update(row.keys())
+            columns = sorted(all_keys)
+
+            import csv
+            with open(output_file, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=columns)
+                writer.writeheader()
+                writer.writerows(results)
+
+            self._log(f"Résultats grid search sauvegardés dans {output_file}")
+
+        if best_result is None:
+            self._log("Aucune combinaison valide trouvée.")
+        else:
+            self._log(f"\nMeilleure combinaison ({metric}): {best_score}")
+            self._log(str(best_result))
+
+        return best_result, results
 
     def evaluate(self, model_path="models/resnet18_mel_finetuned.pth"):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
