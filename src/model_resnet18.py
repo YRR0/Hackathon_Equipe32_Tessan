@@ -144,6 +144,37 @@ class ResNet18Trainer:
 
         return total_loss / len(loader), correct / len(loader.dataset)
 
+    def export_onnx(self, onnx_path="models/resnet18_mel_finetuned.onnx", input_shape=(1, 3, 224, 224), opset_version=17):
+        if not hasattr(self, "model"):
+            raise RuntimeError("Le modèle n'est pas initialisé. Lance l'entraînement ou charge un checkpoint avant export ONNX.")
+
+        model_file = Path(onnx_path)
+        if not model_file.is_absolute():
+            model_file = Path(__file__).resolve().parent / model_file
+        model_file.parent.mkdir(parents=True, exist_ok=True)
+
+        device = next(self.model.parameters()).device
+        dummy_input = torch.randn(*input_shape, device=device)
+
+        self.model.eval()
+        with torch.no_grad():
+            torch.onnx.export(
+                self.model,
+                dummy_input,
+                str(model_file),
+                export_params=True,
+                opset_version=opset_version,
+                do_constant_folding=True,
+                input_names=["input"],
+                output_names=["logits"],
+                dynamic_axes={
+                    "input": {0: "batch_size"},
+                    "logits": {0: "batch_size"},
+                },
+            )
+
+        print(f"Modèle ONNX exporté dans {model_file}")
+
     def train(self, epochs_head=5, epochs_finetune=10, save_model=True):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Device utilisée : {device}")
@@ -219,6 +250,8 @@ class ResNet18Trainer:
             model_file.parent.mkdir(parents=True, exist_ok=True)
             torch.save(self.model.state_dict(), model_file)
             print(f"Modèle sauvegardé dans {model_file}")
+
+            self.export_onnx(onnx_path="models/resnet18_mel_finetuned.onnx")
 
     def evaluate(self, model_path="models/resnet18_mel_finetuned.pth"):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
