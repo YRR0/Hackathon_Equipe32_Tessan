@@ -128,7 +128,7 @@ def main():
 
     # app.training(batch_size=32, epochs_head=8, epochs_finetune=15)
     # app.grid_search()
-    app.predict_file("../data/data_updated/asthma/P1AsthmaIE_1.wav")
+    app.predict_file("../data/data_updated/Bronchial/P1BronchialSc_2.wav")
 
 
 if __name__ == "__main__":
