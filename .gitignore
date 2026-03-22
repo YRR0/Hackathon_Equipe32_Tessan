@@ -14,7 +14,7 @@ label_encoder.pkl
 Snowflake_connexion.ipynb
 resnet18_mel_finetuned.onnx
 resnet18_mel_finetuned.onnx.data
-*.pth
+resnet18_mel_finetuned.pth
 
 
 Phase3_fine_tuning.ipynb
