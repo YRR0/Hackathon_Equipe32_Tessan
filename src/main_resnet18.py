@@ -23,13 +23,14 @@ class MainResNet18:
         trainer.train(epochs_head=epochs_head, epochs_finetune=epochs_finetune, save_model=True)
         print("Evaluation")
         trainer.evaluate(model_path="models/resnet18_mel_finetuned.pth")
-
+        
+        print("Ordre des classes :", list(trainer.le.classes_))
 
 def main():
     app = MainResNet18()
 
     # À lancer une première fois si spectres.npy n'existe pas encore
-    # app.preprocess()
+    #app.preprocess()
 
     app.training(batch_size=32, epochs_head=8, epochs_finetune=15)
 
