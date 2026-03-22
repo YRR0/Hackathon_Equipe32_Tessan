@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import librosa
 import soundfile as sf
+from scipy.ndimage import zoom
 import pandas as pd
 from scipy import signal as scipy_signal
 import os
@@ -33,7 +34,23 @@ class Preprocessor:
         self.n_mels = n_mels
         self.n_mfcc = n_mfcc
         self.verbose = verbose
+        self._mel_matrix = self._build_mel_matrix(target_sr, n_fft, n_mels)
 
+    @staticmethod
+    def _build_mel_matrix(sr, n_fft, n_mels):
+        freqs = np.linspace(0, sr / 2, n_fft // 2 + 1)
+        mel_freqs = np.linspace(0, sr / 2, n_mels)
+        matrix = np.zeros((n_mels, len(freqs)), dtype=np.float32)
+        for i in range(n_mels):
+            lower  = mel_freqs[i - 1] if i > 0          else 0.0
+            upper  = mel_freqs[i + 1] if i < n_mels - 1 else mel_freqs[i]
+            center = mel_freqs[i]
+            for j, fq in enumerate(freqs):
+                if lower <= fq <= center:
+                    matrix[i, j] = (fq - lower) / (center - lower + 1e-10)
+                elif center < fq <= upper:
+                    matrix[i, j] = (upper - fq) / (upper - center + 1e-10)
+        return matrix
 
     def preprocess_audio_dataset(self, target_sr: int, target_duration_sec: float, input_root: str = "../data"):
         input_root = Path(input_root)
@@ -58,7 +75,15 @@ class Preprocessor:
             dst_wav = output_root / rel_path
             dst_wav.parent.mkdir(parents=True, exist_ok=True)
 
-            y, _ = librosa.load(str(src_wav), sr=target_sr, mono=True)
+            #y, _ = librosa.load(str(src_wav), sr=target_sr, mono=True)
+            y, file_sr = sf.read(str(src_wav), always_2d=False)
+            if y.ndim == 2:
+                y = y.mean(axis=1)
+            y = y.astype(np.float32)
+            if file_sr != target_sr:
+                from scipy.signal import resample
+                y = resample(y, int(len(y) * target_sr / file_sr)).astype(np.float32)
+                
             original_samples = len(y)
 
             if original_samples == 0:
@@ -91,8 +116,16 @@ class Preprocessor:
     def preprocess_audio_file(self, wav_path, target_sr: int, target_duration_sec: float):
         """Load one wav file and force a fixed duration."""
         target_samples = int(target_sr * target_duration_sec)
-        y, _ = librosa.load(str(wav_path), sr=target_sr, mono=True)
-
+        #y, _ = librosa.load(str(wav_path), sr=target_sr, mono=True)
+        import soundfile as sf
+        y, file_sr = sf.read(str(wav_path), always_2d=False)
+        if y.ndim == 2:
+            y = y.mean(axis=1)
+        y = y.astype(np.float32)
+        if file_sr != target_sr:
+            from scipy.signal import resample
+            y = resample(y, int(len(y) * target_sr / file_sr)).astype(np.float32)
+        
         if len(y) == 0:
             return np.zeros(target_samples, dtype=np.float32)
         if len(y) < target_samples:
@@ -102,18 +135,36 @@ class Preprocessor:
             return y[:target_samples]
         return y
 
+    # def compute_mel_spectrogram(self, y, sr=22050):
+    #     mel = librosa.feature.melspectrogram(
+    #         y=y,
+    #         sr=sr,
+    #         n_mels=self.n_mels,      # nombre de bandes de fréquences → hauteur de l'image
+    #         n_fft=self.n_fft,      # taille de la fenêtre FFT → résolution fréquentielle
+    #         hop_length=self.hop_length,  # pas entre chaque fenêtre → résolution temporelle
+    #         # fmax=4000        # fréquence max utile pour sons respiratoires
+    #     )
+    #     mel_db = librosa.power_to_db(mel, ref=np.max)
+    #     mel_norm = (mel_db - mel_db.min()) / (mel_db.max() - mel_db.min()) # Normalisation
+    #     return mel_norm  # shape : (128, 259) → image 128×259 pixels
+    
     def compute_mel_spectrogram(self, y, sr=22050):
-        mel = librosa.feature.melspectrogram(
-            y=y,
-            sr=sr,
-            n_mels=self.n_mels,      # nombre de bandes de fréquences → hauteur de l'image
-            n_fft=self.n_fft,      # taille de la fenêtre FFT → résolution fréquentielle
-            hop_length=self.hop_length,  # pas entre chaque fenêtre → résolution temporelle
-            # fmax=4000        # fréquence max utile pour sons respiratoires
+        f, t, Sxx = scipy_signal.spectrogram(
+            y, fs=sr,
+            nperseg=self.n_fft,
+            noverlap=self.n_fft - self.hop_length,
+            window='hann',
+            scaling='spectrum'
         )
-        mel_db = librosa.power_to_db(mel, ref=np.max)
-        mel_norm = (mel_db - mel_db.min()) / (mel_db.max() - mel_db.min()) # Normalisation
-        return mel_norm  # shape : (128, 259) → image 128×259 pixels
+        mel_spec = self._mel_matrix @ Sxx          # (n_mels, T)
+        mel_db   = 10 * np.log10(mel_spec + 1e-10)
+        mel_db   = mel_db - mel_db.max()           # ref=np.max
+        mn, mx   = mel_db.min(), mel_db.max()
+        if mx > mn:
+            mel_norm = (mel_db - mn) / (mx - mn)
+        else:
+            mel_norm = np.zeros_like(mel_db)
+        return mel_norm.astype(np.float32)
     
     def compute_mfcc_spectrogram(self, y, sr=22050, n_mfcc=20):
         """MFCC - Mel-Frequency Cepstral Coefficients (20 coeffs)"""
@@ -227,7 +278,14 @@ class Preprocessor:
                 wav_file = wav_path.name
 
                 try:
-                    y, _ = librosa.load(str(wav_path), sr=self.target_sr, mono=True)
+                    #y, _ = librosa.load(str(wav_path), sr=self.target_sr, mono=True)
+                    y, file_sr = sf.read(str(wav_path), always_2d=False)
+                    if y.ndim == 2:
+                        y = y.mean(axis=1)
+                    y = y.astype(np.float32)
+                    if file_sr != self.target_sr:
+                        from scipy.signal import resample
+                        y = resample(y, int(len(y) * self.target_sr / file_sr)).astype(np.float32)
                     y_clean = self.apply_bandpass_filter(y, sr=self.target_sr)
                     
                     mel = self.compute_mel_spectrogram(y_clean)
