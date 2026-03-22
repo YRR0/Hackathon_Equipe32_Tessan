@@ -29,9 +29,9 @@ def main():
     app = MainResNet18()
 
     # À lancer une première fois si spectres.npy n'existe pas encore
-    app.preprocess()
+    # app.preprocess()
 
-    app.training(batch_size=32, epochs_head=5, epochs_finetune=10)
+    app.training(batch_size=32, epochs_head=8, epochs_finetune=15)
 
 
 if __name__ == "__main__":

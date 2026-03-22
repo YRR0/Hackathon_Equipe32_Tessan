@@ -144,7 +144,7 @@ class ResNet18Trainer:
 
         return total_loss / len(loader), correct / len(loader.dataset)
 
-    def export_onnx(self, onnx_path="models/resnet18_mel_finetuned.onnx", input_shape=(1, 3, 224, 224), opset_version=17):
+    def export_onnx(self, onnx_path="models/resnet18_mel_finetuned.onnx", input_shape=(1, 3, 224, 224), opset_version=18):
         if not hasattr(self, "model"):
             raise RuntimeError("Le modèle n'est pas initialisé. Lance l'entraînement ou charge un checkpoint avant export ONNX.")
 
@@ -157,21 +157,34 @@ class ResNet18Trainer:
         dummy_input = torch.randn(*input_shape, device=device)
 
         self.model.eval()
+        export_kwargs = dict(
+            export_params=True,
+            opset_version=opset_version,
+            do_constant_folding=True,
+            input_names=["input"],
+            output_names=["logits"],
+            dynamic_axes={
+                "input": {0: "batch_size"},
+                "logits": {0: "batch_size"},
+            },
+        )
+
         with torch.no_grad():
-            torch.onnx.export(
-                self.model,
-                dummy_input,
-                str(model_file),
-                export_params=True,
-                opset_version=opset_version,
-                do_constant_folding=True,
-                input_names=["input"],
-                output_names=["logits"],
-                dynamic_axes={
-                    "input": {0: "batch_size"},
-                    "logits": {0: "batch_size"},
-                },
-            )
+            try:
+                torch.onnx.export(
+                    self.model,
+                    dummy_input,
+                    str(model_file),
+                    dynamo=False,
+                    **export_kwargs,
+                )
+            except TypeError:
+                torch.onnx.export(
+                    self.model,
+                    dummy_input,
+                    str(model_file),
+                    **export_kwargs,
+                )
 
         print(f"Modèle ONNX exporté dans {model_file}")
 
