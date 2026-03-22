@@ -32,7 +32,10 @@ class ResNet18FineTuned(nn.Module):
                 param.requires_grad = False
 
         in_features = self.backbone.fc.in_features
-        self.backbone.fc = nn.Linear(in_features, num_classes)
+        self.backbone.fc = nn.Sequential(
+            nn.Dropout(p=0.4),
+            nn.Linear(in_features, num_classes)
+        )
 
     def forward(self, x):
         return self.backbone(x)
@@ -218,7 +221,7 @@ class ResNet18Trainer:
         print("\n=== Phase 1 : entraînement de la tête ===")
         optimizer = torch.optim.Adam(
             filter(lambda p: p.requires_grad, self.model.parameters()),
-            lr=1e-3
+            lr=3e-5
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, patience=3, factor=0.5
@@ -247,6 +250,10 @@ class ResNet18Trainer:
             optimizer, patience=3, factor=0.5
         )
 
+        best_val_loss = float("inf")
+        patience_counter = 0
+        early_stop_patience = 5
+
         for epoch in range(epochs_finetune):
             train_loss, train_acc = self._train_epoch(self.model, self.train_loader, criterion, optimizer, device)
             val_loss, val_acc = self._eval_epoch(self.model, self.val_loader, criterion, device)
@@ -258,10 +265,24 @@ class ResNet18Trainer:
                 f"Val loss {val_loss:.3f} acc {val_acc:.3f}"
             )
 
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+                # Sauvegarde le meilleur modèle
+                model_file = Path(__file__).resolve().parent / "models" / "resnet18_mel_finetuned.pth"
+                model_file.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(self.model.state_dict(), model_file)
+                print(f"  → Meilleur modèle sauvegardé (val_loss={best_val_loss:.4f})")
+            else:
+                patience_counter += 1
+                if patience_counter >= early_stop_patience:
+                    print(f"Early stopping déclenché à l'epoch {epoch+1}")
+                    break
+
         if save_model:
-            model_file = Path(__file__).resolve().parent / "models" / "resnet18_mel_finetuned.pth"
-            model_file.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(self.model.state_dict(), model_file)
+            # model_file = Path(__file__).resolve().parent / "models" / "resnet18_mel_finetuned.pth"
+            # model_file.parent.mkdir(parents=True, exist_ok=True)
+            # torch.save(self.model.state_dict(), model_file)
             print(f"Modèle sauvegardé dans {model_file}")
 
             self.export_onnx(onnx_path="models/resnet18_mel_finetuned.onnx")
