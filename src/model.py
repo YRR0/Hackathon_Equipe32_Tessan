@@ -40,7 +40,8 @@ class Model:
 
     def load_data(self):
         # Chargement des données depuis le fichier unifié
-        self.spectres = np.load("spectres.npy", allow_pickle=True).item() # MAYBE MODIF AVC NEW FORMAT
+        data_file = Path(__file__).resolve().parent.parent / "data" / "spectres.npy"
+        self.spectres = np.load(data_file, allow_pickle=True).item() # MAYBE MODIF AVC NEW FORMAT
         self.mels = self.spectres["mel"]
         self.labels = self.spectres["labels"]
 
@@ -85,6 +86,12 @@ class Model:
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Device utilisee : {device}")
+        
+        # Optimisations pour CPU
+        if device.type == "cpu":
+            torch.set_num_threads(8)  # Utiliser tous les CPU cores disponibles
+            torch.set_num_interop_threads(1)
+            print(f"CPU threads: {torch.get_num_threads()}")
 
         # Load des data
         self.load_data()
@@ -98,13 +105,13 @@ class Model:
         )
         weights_tensor = torch.FloatTensor(class_weights)
 
-        model = CNN_model(
+        self.model = CNN_model(
             num_classes=len(self.le.classes_),
             in_channels=self.full_dataset.num_channels
         ).to(device)
         weights_tensor = weights_tensor.to(device)
         criterion = nn.CrossEntropyLoss(weight=weights_tensor)
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-3)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, patience=5, factor=0.5
         )
@@ -138,8 +145,8 @@ class Model:
         # Entraînement
         EPOCHS = epochs
         for epoch in range(EPOCHS):
-            train_loss, train_acc = train_epoch(model, self.train_loader, criterion, optimizer)
-            val_loss, val_acc = eval_epoch(model, self.val_loader, criterion)
+            train_loss, train_acc = train_epoch(self.model, self.train_loader, criterion, optimizer)
+            val_loss, val_acc = eval_epoch(self.model, self.val_loader, criterion)
             scheduler.step(val_loss)
 
             if (epoch + 1) % 5 == 0:
@@ -150,31 +157,44 @@ class Model:
                 )
 
         if save_model:
-            torch.save(model.state_dict(), "models/cnn_respiratory.pth")
+            model_file = Path(__file__).resolve().parent / "models" / "cnn_respiratory.pth"
+            model_file.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(self.model.state_dict(), model_file)
+    
+    # add a save fct for grid_search?
 
-    def evaluate(self, CNN_model, model_path="models/cnn_respiratory.pth"):
+    def evaluate(self, model_path="models/cnn_respiratory.pth"):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = CNN_model(
-            num_classes=len(self.le.classes_),
-            in_channels=self.full_dataset.num_channels
-        ).to(device)
-        model.load_state_dict(torch.load(model_path, map_location=device))
-        model.eval()
+        model_file = Path(model_path)
+        if not model_file.is_absolute():
+            model_file = Path(__file__).resolve().parent / model_file
+        # self.model = CNN_model(
+        #     num_classes=len(self.le.classes_),
+        #     in_channels=self.full_dataset.num_channels
+        # ).to(device)
+        try:
+            state_dict = torch.load(model_file, map_location=device, weights_only=True)
+        except TypeError:
+            state_dict = torch.load(model_file, map_location=device)
+        self.model.load_state_dict(state_dict)
+        self.model.eval()
 
         all_preds, all_probs, all_true = [], [], []
         with torch.no_grad():
             for X_batch, y_batch in self.test_loader:
-                out   = model(X_batch)
+                X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+                out = self.model(X_batch)
                 probs = torch.softmax(out, dim=1)
-                all_preds.extend(out.argmax(1).numpy())
-                all_probs.extend(probs.numpy())
-                all_true.extend(y_batch.numpy())
+                all_preds.extend(out.argmax(1).cpu().numpy())
+                all_probs.extend(probs.cpu().numpy())
+                all_true.extend(y_batch.cpu().numpy())
         all_preds = np.array(all_preds)
         all_probs = np.array(all_probs)
-        all_true  = np.array(all_true)
+        all_true = np.array(all_true)
 
         print(classification_report(all_true, all_preds,
-                                    target_names=self.le.classes_))
+                                    target_names=self.le.classes_,
+                                    zero_division=0))
 
         f1_macro = f1_score(all_true, all_preds, average='macro')
         print(f"Macro F1-score : {f1_macro:.3f}")
@@ -191,7 +211,7 @@ class Model:
         plt.ylabel("Réel")
         plt.xlabel("Prédit")
         plt.tight_layout()
-        plt.show()
+        # plt.show()
 
     def grid_search(self, CNN_model, param_grid):
         # À implémenter : entraînement de plusieurs modèles avec différentes combinaisons d'hyperparamètres
