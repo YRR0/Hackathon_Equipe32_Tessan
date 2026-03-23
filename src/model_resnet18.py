@@ -272,7 +272,7 @@ class ResNet18Trainer:
                 model_file = Path(__file__).resolve().parent / "models" / "resnet18_mel_finetuned.pth"
                 model_file.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(self.model.state_dict(), model_file)
-                print(f"  → Meilleur modèle sauvegardé (val_loss={best_val_loss:.4f})")
+                print(f" -> Meilleur modèle sauvegardé (val_loss={best_val_loss:.4f})")
             else:
                 patience_counter += 1
                 if patience_counter >= early_stop_patience:
