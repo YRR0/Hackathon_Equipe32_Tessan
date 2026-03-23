@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from preprocessing import Preprocessor
-from model_resnet18 import ResNet18Trainer, ResNet18FineTuned
+from model import ResNet18Trainer, ResNet18FineTuned
 
 
 class MainResNet18:
@@ -124,11 +124,11 @@ def main():
     app = MainResNet18()
 
     # À lancer une première fois si spectres.npy n'existe pas encore
-    # app.preprocess()
+    app.preprocess()
 
-    # app.training(batch_size=32, epochs_head=8, epochs_finetune=15)
+    app.training(batch_size=32, epochs_head=5, epochs_finetune=10)
     # app.grid_search()
-    app.predict_file("../data/data_updated/Bronchial/P1BronchialSc_2.wav")
+    # app.predict_file("../data/data_updated/Bronchial/P1BronchialSc_2.wav")
 
 
 if __name__ == "__main__":

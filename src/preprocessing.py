@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import librosa
 import soundfile as sf
+from scipy.ndimage import zoom
 import pandas as pd
 from scipy import signal as scipy_signal
 import os
@@ -34,7 +35,6 @@ class Preprocessor:
         self.n_mfcc = n_mfcc
         self.verbose = verbose
 
-
     def preprocess_audio_dataset(self, target_sr: int, target_duration_sec: float, input_root: str = "../data"):
         input_root = Path(input_root)
         if not input_root.is_absolute():
@@ -59,6 +59,7 @@ class Preprocessor:
             dst_wav.parent.mkdir(parents=True, exist_ok=True)
 
             y, _ = librosa.load(str(src_wav), sr=target_sr, mono=True)
+                
             original_samples = len(y)
 
             if original_samples == 0:
@@ -92,7 +93,7 @@ class Preprocessor:
         """Load one wav file and force a fixed duration."""
         target_samples = int(target_sr * target_duration_sec)
         y, _ = librosa.load(str(wav_path), sr=target_sr, mono=True)
-
+        
         if len(y) == 0:
             return np.zeros(target_samples, dtype=np.float32)
         if len(y) < target_samples:
@@ -103,17 +104,18 @@ class Preprocessor:
         return y
 
     def compute_mel_spectrogram(self, y, sr=22050):
+        # Modif liée au commit b9569c8 : retour explicite à librosa pour
+        # aligner exactement le prétraitement local avec le pipeline attendu.
         mel = librosa.feature.melspectrogram(
             y=y,
             sr=sr,
-            n_mels=self.n_mels,      # nombre de bandes de fréquences → hauteur de l'image
-            n_fft=self.n_fft,      # taille de la fenêtre FFT → résolution fréquentielle
-            hop_length=self.hop_length,  # pas entre chaque fenêtre → résolution temporelle
-            # fmax=4000        # fréquence max utile pour sons respiratoires
+            n_mels=self.n_mels,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
         )
         mel_db = librosa.power_to_db(mel, ref=np.max)
-        mel_norm = (mel_db - mel_db.min()) / (mel_db.max() - mel_db.min()) # Normalisation
-        return mel_norm  # shape : (128, 259) → image 128×259 pixels
+        mel_norm = (mel_db - mel_db.min()) / (mel_db.max() - mel_db.min() + 1e-8)
+        return mel_norm.astype(np.float32)
     
     def compute_mfcc_spectrogram(self, y, sr=22050, n_mfcc=20):
         """MFCC - Mel-Frequency Cepstral Coefficients (20 coeffs)"""
