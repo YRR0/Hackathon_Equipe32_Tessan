@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import librosa
 import soundfile as sf
+from scipy.ndimage import zoom
 import pandas as pd
 from scipy import signal as scipy_signal
 import os
@@ -19,12 +20,14 @@ class Preprocessor:
 
     Need to call function spectres_creation_and_save().
     '''
-    def __init__(self,target_sr=22050,target_duration_sec=6,input_root="data",
+    def __init__(self,target_sr=22050,target_duration_sec=6,input_root="../data",
                     n_fft=2048, hop_length=512, n_mels=128, n_mfcc=20, verbose=False):
         
         self.target_sr = target_sr
         self.target_duration_sec = target_duration_sec
-        self.input_root = Path(input_root)
+        base_dir = Path(__file__).resolve().parent
+        input_path = Path(input_root)
+        self.input_root = input_path if input_path.is_absolute() else (base_dir / input_path).resolve()
 
         self.n_fft = n_fft
         self.hop_length = hop_length
@@ -32,21 +35,31 @@ class Preprocessor:
         self.n_mfcc = n_mfcc
         self.verbose = verbose
 
-
-    def preprocess_audio_dataset(self, target_sr: int, target_duration_sec: float, input_root: str = "data"):
+    def preprocess_audio_dataset(self, target_sr: int, target_duration_sec: float, input_root: str = "../data"):
         input_root = Path(input_root)
-        output_root = input_root.parent / "data_updated"
+        if not input_root.is_absolute():
+            base_dir = Path(__file__).resolve().parent
+            input_root = (base_dir / input_root).resolve()
+        
+        # Always look in data_original subfolder to avoid recursive issues with data_updated
+        data_original = input_root / "data_original"
+        if not data_original.exists():
+            # Fallback: if data_original doesn't exist, use input_root directly (for backward compatibility)
+            data_original = input_root
+        
+        output_root = input_root / "data_updated"
         output_root.mkdir(parents=True, exist_ok=True)
 
         target_samples = int(target_sr * target_duration_sec)
         rows = []
 
-        for src_wav in input_root.rglob("*.wav"):
-            rel_path = src_wav.relative_to(input_root)
+        for src_wav in data_original.rglob("*.wav"):
+            rel_path = src_wav.relative_to(data_original)
             dst_wav = output_root / rel_path
             dst_wav.parent.mkdir(parents=True, exist_ok=True)
 
             y, _ = librosa.load(str(src_wav), sr=target_sr, mono=True)
+                
             original_samples = len(y)
 
             if original_samples == 0:
@@ -80,7 +93,7 @@ class Preprocessor:
         """Load one wav file and force a fixed duration."""
         target_samples = int(target_sr * target_duration_sec)
         y, _ = librosa.load(str(wav_path), sr=target_sr, mono=True)
-
+        
         if len(y) == 0:
             return np.zeros(target_samples, dtype=np.float32)
         if len(y) < target_samples:
@@ -91,17 +104,18 @@ class Preprocessor:
         return y
 
     def compute_mel_spectrogram(self, y, sr=22050):
+        # Modif liée au commit b9569c8 : retour explicite à librosa pour
+        # aligner exactement le prétraitement local avec le pipeline attendu.
         mel = librosa.feature.melspectrogram(
             y=y,
             sr=sr,
-            n_mels=self.n_mels,      # nombre de bandes de fréquences → hauteur de l'image
-            n_fft=self.n_fft,      # taille de la fenêtre FFT → résolution fréquentielle
-            hop_length=self.hop_length,  # pas entre chaque fenêtre → résolution temporelle
-            # fmax=4000        # fréquence max utile pour sons respiratoires
+            n_mels=self.n_mels,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
         )
         mel_db = librosa.power_to_db(mel, ref=np.max)
-        mel_norm = (mel_db - mel_db.min()) / (mel_db.max() - mel_db.min()) # Normalisation
-        return mel_norm  # shape : (128, 259) → image 128×259 pixels
+        mel_norm = (mel_db - mel_db.min()) / (mel_db.max() - mel_db.min() + 1e-8)
+        return mel_norm.astype(np.float32)
     
     def compute_mfcc_spectrogram(self, y, sr=22050, n_mfcc=20):
         """MFCC - Mel-Frequency Cepstral Coefficients (20 coeffs)"""
@@ -197,8 +211,8 @@ class Preprocessor:
             self.input_root,
         )
 
-        csv_dir = Path("csv")
-        csv_dir.mkdir(parents=True, exist_ok=True)
+        # csv_dir = Path("csv")
+        # csv_dir.mkdir(parents=True, exist_ok=True)
         # fix_duration_df.to_csv(csv_dir / "fix_duration_report.csv", index=False)
 
         if self.verbose:
@@ -250,9 +264,10 @@ class Preprocessor:
             "chroma": all_chromas,
             "labels": all_labels,
         }
-        np.save("spectres.npy", spectres, allow_pickle=True)
+        output_file = self.input_root / "spectres.npy"
+        np.save(output_file, spectres, allow_pickle=True)
 
         # pd.DataFrame(all_features).to_csv(csv_dir / "features_dataset.csv", index=False)
 
         if self.verbose:
-            print(f"Saved {len(all_labels)} samples to spectres.npy")
+            print(f"Saved {len(all_labels)} samples to {output_file}")
