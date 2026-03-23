@@ -1,7 +1,5 @@
 data/
-data_2/
 data_updated/
-data_4k/
 __pycache__
 spectres.npy
 features_dataset.npy
@@ -14,7 +12,12 @@ mel_spectrograms.npy
 .env.example
 label_encoder.pkl
 Snowflake_connexion.ipynb
+resnet18_mel_finetuned.onnx
+resnet18_mel_finetuned.onnx.data
+resnet18_mel_finetuned.pth
+
 
 Phase3_fine_tuning.ipynb
 phase1.ipynb
 start copy.ipynb
+src/models/resnet18_mel_finetuned.pth
