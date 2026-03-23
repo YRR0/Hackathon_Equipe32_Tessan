@@ -86,7 +86,7 @@ class MainResNet18:
             "probabilities": {class_names[i]: float(probs[i]) for i in range(len(class_names))},
         }
 
-    def grid_search(self):
+    def grid_search(self, cv_folds=5):
         trainer = ResNet18Trainer(batch_size=32, num_workers=0, pin_memory=True)
 
         param_grid = {
@@ -115,6 +115,7 @@ class MainResNet18:
             results_path="models/resnet18_grid_search_results.csv",
             max_trials=24,
             random_state=42,
+            cv_folds=cv_folds,
         )
         print("Best configuration:")
         print(best)
@@ -126,8 +127,8 @@ def main():
     # À lancer une première fois si spectres.npy n'existe pas encore
     # app.preprocess()
 
-    app.training(batch_size=32, epochs_head=5, epochs_finetune=10)
-    # app.grid_search()
+    # app.training(batch_size=32, epochs_head=5, epochs_finetune=10)
+    # app.grid_search(cv_folds=5)
     # app.predict_file("../data/data_updated/Bronchial/P1BronchialSc_2.wav")
 
 

@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
-from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 from sklearn.preprocessing import LabelEncoder
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, f1_score
@@ -54,6 +54,7 @@ class ResNet18Trainer:
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.pin_memory = pin_memory
+        self._cpu_threads_configured = False
         self.train_aug_params = {
             "gaussian_noise_std": 0.01,
             "time_shift_max": 12,
@@ -132,6 +133,15 @@ class ResNet18Trainer:
             num_workers=self.num_workers,
             pin_memory=self.pin_memory
         )
+
+    @staticmethod
+    def _set_seed(seed):
+        if seed is None:
+            return
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
     def _train_epoch(self, model, loader, criterion, optimizer, device):
         model.train()
@@ -228,16 +238,26 @@ class ResNet18Trainer:
         scheduler_patience=3,
         scheduler_factor=0.5,
         log_prefix="",
+        train_indices=None,
+        val_indices=None,
+        seed=None,
     ):
+        self._set_seed(seed)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._log(f"{log_prefix}Device utilisée : {device}")
 
-        if device.type == "cpu":
+        if device.type == "cpu" and not self._cpu_threads_configured:
             torch.set_num_threads(8)
             torch.set_num_interop_threads(1)
+            self._cpu_threads_configured = True
             self._log(f"{log_prefix}CPU threads: {torch.get_num_threads()}")
 
         self.load_data()
+
+        if train_indices is not None and val_indices is not None:
+            self.train_idx = np.asarray(train_indices)
+            self.val_idx = np.asarray(val_indices)
+
         self.build_loaders()
 
         weights_tensor = None
@@ -358,6 +378,7 @@ class ResNet18Trainer:
         results_path="models/resnet18_grid_search_results.csv",
         max_trials=None,
         random_state=42,
+        cv_folds=1,
     ):
         if not isinstance(param_grid, dict) or len(param_grid) == 0:
             raise ValueError("param_grid doit être un dict non vide de listes de valeurs.")
@@ -368,6 +389,22 @@ class ResNet18Trainer:
 
         model_dir = Path(__file__).resolve().parent / "models"
         model_dir.mkdir(parents=True, exist_ok=True)
+
+        if cv_folds < 1:
+            raise ValueError("cv_folds doit être >= 1.")
+
+        cv_pool_idx = None
+        cv_pool_y = None
+        if cv_folds > 1:
+            self.load_data()
+            cv_pool_idx = np.concatenate([self.train_idx, self.val_idx])
+            cv_pool_y = self.y_enc[cv_pool_idx]
+            class_counts = np.bincount(cv_pool_y)
+            min_count = int(class_counts.min()) if len(class_counts) > 0 else 0
+            if min_count < cv_folds:
+                raise ValueError(
+                    f"Impossible d'utiliser cv_folds={cv_folds}: une classe n'a que {min_count} échantillon(s) dans train+val."
+                )
 
         original_batch_size = self.batch_size
         original_aug_params = dict(self.train_aug_params)
@@ -411,12 +448,46 @@ class ResNet18Trainer:
             train_kwargs["save_model"] = False
 
             try:
-                run_metrics = self.train(
-                    **train_kwargs,
-                    log_prefix=f"[GS {idx}/{len(combinations)}] ",
-                )
-                score = run_metrics.get(metric)
-                row = {**params, **run_metrics, "score": score}
+                if cv_folds > 1:
+                    skf = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+                    fold_metrics = []
+                    fold_scores = []
+
+                    for fold, (train_rel, val_rel) in enumerate(skf.split(cv_pool_idx, cv_pool_y), start=1):
+                        fold_train_idx = cv_pool_idx[train_rel]
+                        fold_val_idx = cv_pool_idx[val_rel]
+                        run_metrics = self.train(
+                            **train_kwargs,
+                            log_prefix=f"[GS {idx}/{len(combinations)}][Fold {fold}/{cv_folds}] ",
+                            train_indices=fold_train_idx,
+                            val_indices=fold_val_idx,
+                            seed=random_state + idx * 100 + fold,
+                        )
+                        fold_metrics.append(run_metrics)
+                        fold_score = run_metrics.get(metric)
+                        if fold_score is not None:
+                            fold_scores.append(float(fold_score))
+
+                    score = float(np.mean(fold_scores)) if len(fold_scores) > 0 else None
+                    score_std = float(np.std(fold_scores)) if len(fold_scores) > 0 else None
+                    row = {
+                        **params,
+                        "cv_folds": cv_folds,
+                        "cv_metric": metric,
+                        "cv_score_mean": score,
+                        "cv_score_std": score_std,
+                        "cv_scores": str([round(s, 6) for s in fold_scores]),
+                        "score": score,
+                    }
+                else:
+                    run_metrics = self.train(
+                        **train_kwargs,
+                        log_prefix=f"[GS {idx}/{len(combinations)}] ",
+                        seed=random_state + idx,
+                    )
+                    score = run_metrics.get(metric)
+                    row = {**params, **run_metrics, "score": score}
+
                 results.append(row)
 
                 if score is None:

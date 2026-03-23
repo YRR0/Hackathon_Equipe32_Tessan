@@ -18,7 +18,6 @@ resnet18_mel_finetuned.pth
 resnet18_grid_search_results_smoke.csv
 resnet18_grid_search_results.csv
 resnet18_mel_finetuned.pth
-
 Phase3_fine_tuning.ipynb
 phase1.ipynb
 start copy.ipynb
