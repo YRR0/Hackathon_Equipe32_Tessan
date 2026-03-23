@@ -1,20 +1,14 @@
-'''
-Main class for testing preprocessing and model pipeline
-'''
+"""
+Main dédié à la version ResNet18 fine-tunée sur Mel-spectrogrammes.
+Ne modifie pas le pipeline existant.
+"""
 
-import numpy as np
-import torch
 from pathlib import Path
 from preprocessing import Preprocessor
-from model import Model, MultiSpectreDataset
-from models.RespiratoryCNN import RespiratoryCNN
-from models.CNNBILSTMANAttention import CNNBiLSTMAttention
+from model import ResNet18Trainer
 
-class Main:
-    """
-    Main class
-    """
-    
+
+class MainResNet18:
     def __init__(self, data_root="../data/"):
         base_dir = Path(__file__).resolve().parent
         data_path = Path(data_root)
@@ -24,21 +18,22 @@ class Main:
         preprocessor = Preprocessor(22050, 6, self.data_root, verbose=True)
         preprocessor.spectres_creation_and_save()
 
-    def training(self, model):
-        model_class = Model(batch_size=1, num_workers=0, pin_memory=True)
-        model_class.train(model, epochs=2, save_model=True)
+    def training(self, batch_size=16, epochs_head=5, epochs_finetune=10):
+        trainer = ResNet18Trainer(batch_size=batch_size, num_workers=0, pin_memory=True)
+        trainer.train(epochs_head=epochs_head, epochs_finetune=epochs_finetune, save_model=True)
         print("Evaluation")
-        model_class.evaluate()
-
-
+        trainer.evaluate(model_path="models/resnet18_mel_finetuned.pth")
+        
+        print("Ordre des classes :", list(trainer.le.classes_))
 
 def main():
-    main = Main()
-    # main.preprocess()
+    app = MainResNet18()
 
-    #model = CNNBiLSTMAttention
-    model = RespiratoryCNN
-    main.training(model)
+    # À lancer une première fois si spectres.npy n'existe pas encore
+    # app.preprocess()
+
+    app.training(batch_size=32, epochs_head=8, epochs_finetune=15)
+
 
 if __name__ == "__main__":
     main()
