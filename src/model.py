@@ -1,9 +1,10 @@
 from pathlib import Path
+import sys
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
-from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.model_selection import StratifiedShuffleSplit, StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, f1_score
@@ -57,9 +58,25 @@ class ResNet18Trainer:
         self.num_workers = num_workers
         self.pin_memory = pin_memory
 
+    @staticmethod
+    def _load_spectres_compat(data_file):
+        try:
+            return np.load(data_file, allow_pickle=True).item()
+        except ModuleNotFoundError as err:
+            if "numpy._core" not in str(err):
+                raise
+
+            import numpy.core as numpy_core
+
+            sys.modules.setdefault("numpy._core", numpy_core)
+            if hasattr(numpy_core, "multiarray"):
+                sys.modules.setdefault("numpy._core.multiarray", numpy_core.multiarray)
+
+            return np.load(data_file, allow_pickle=True).item()
+
     def load_data(self):
         data_file = Path(__file__).resolve().parent.parent / "data" / "spectres.npy"
-        self.spectres = np.load(data_file, allow_pickle=True).item()
+        self.spectres = self._load_spectres_compat(data_file)
 
         self.mels = self.spectres["mel"]
         self.labels = self.spectres["labels"]
@@ -109,6 +126,25 @@ class ResNet18Trainer:
             pin_memory=self.pin_memory
         )
 
+    def build_loaders_from_indices(self, train_idx, val_idx):
+        self.full_dataset = MelResNetDataset(self.spectres, self.y_enc, target_size=(224, 224))
+
+        self.train_loader = DataLoader(
+            Subset(self.full_dataset, train_idx),
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
+        )
+
+        self.val_loader = DataLoader(
+            Subset(self.full_dataset, val_idx),
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
+        )
+
     def _train_epoch(self, model, loader, criterion, optimizer, device):
         model.train()
         total_loss = 0.0
@@ -146,6 +182,148 @@ class ResNet18Trainer:
                 correct += (out.argmax(dim=1) == y_batch).sum().item()
 
         return total_loss / len(loader), correct / len(loader.dataset)
+
+    def _predict_loader(self, model, loader, device):
+        model.eval()
+        all_preds, all_probs, all_true = [], [], []
+
+        with torch.no_grad():
+            for X_batch, y_batch in loader:
+                X_batch = X_batch.to(device)
+                y_batch = y_batch.to(device)
+
+                out = model(X_batch)
+                probs = torch.softmax(out, dim=1)
+
+                all_preds.extend(out.argmax(1).cpu().numpy())
+                all_probs.extend(probs.cpu().numpy())
+                all_true.extend(y_batch.cpu().numpy())
+
+        return np.array(all_true), np.array(all_preds), np.array(all_probs)
+
+    def cross_validate(self, n_splits=5, epochs_head=3, epochs_finetune=7, random_state=42):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Device utilisée : {device}")
+
+        if device.type == "cpu":
+            torch.set_num_threads(8)
+            torch.set_num_interop_threads(1)
+            print(f"CPU threads: {torch.get_num_threads()}")
+
+        self.load_data()
+
+        indices = np.arange(len(self.y_enc))
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+
+        fold_results = []
+
+        for fold_idx, (train_idx, val_idx) in enumerate(skf.split(indices, self.y_enc), start=1):
+            print(f"\n===== Fold {fold_idx}/{n_splits} =====")
+            self.build_loaders_from_indices(train_idx, val_idx)
+
+            class_weights = compute_class_weight(
+                class_weight="balanced",
+                classes=np.unique(self.y_enc),
+                y=self.y_enc[train_idx],
+            )
+            weights_tensor = torch.FloatTensor(class_weights).to(device)
+            criterion = nn.CrossEntropyLoss(weight=weights_tensor)
+
+            model = ResNet18FineTuned(
+                num_classes=len(self.le.classes_),
+                freeze_backbone=True,
+            ).to(device)
+
+            optimizer = torch.optim.Adam(
+                filter(lambda p: p.requires_grad, model.parameters()),
+                lr=3e-5,
+            )
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, patience=2, factor=0.5
+            )
+
+            for epoch in range(epochs_head):
+                train_loss, train_acc = self._train_epoch(model, self.train_loader, criterion, optimizer, device)
+                val_loss, val_acc = self._eval_epoch(model, self.val_loader, criterion, device)
+                scheduler.step(val_loss)
+                print(
+                    f"[F{fold_idx} HEAD] Epoch {epoch+1:02d} | "
+                    f"Train loss {train_loss:.3f} acc {train_acc:.3f} | "
+                    f"Val loss {val_loss:.3f} acc {val_acc:.3f}"
+                )
+
+            model.unfreeze_last_block()
+            optimizer = torch.optim.Adam(
+                filter(lambda p: p.requires_grad, model.parameters()),
+                lr=1e-4,
+            )
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, patience=2, factor=0.5
+            )
+
+            best_state_dict = None
+            best_val_loss = float("inf")
+
+            for epoch in range(epochs_finetune):
+                train_loss, train_acc = self._train_epoch(model, self.train_loader, criterion, optimizer, device)
+                val_loss, val_acc = self._eval_epoch(model, self.val_loader, criterion, device)
+                scheduler.step(val_loss)
+                print(
+                    f"[F{fold_idx} FT] Epoch {epoch+1:02d} | "
+                    f"Train loss {train_loss:.3f} acc {train_acc:.3f} | "
+                    f"Val loss {val_loss:.3f} acc {val_acc:.3f}"
+                )
+
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+            if best_state_dict is not None:
+                model.load_state_dict(best_state_dict)
+
+            y_true, y_pred, y_prob = self._predict_loader(model, self.val_loader, device)
+
+            fold_f1 = f1_score(y_true, y_pred, average="macro")
+            fold_acc = float((y_true == y_pred).mean())
+            try:
+                fold_auc = roc_auc_score(y_true, y_prob, multi_class="ovr", average="macro")
+            except ValueError:
+                fold_auc = np.nan
+
+            result = {
+                "fold": fold_idx,
+                "accuracy": fold_acc,
+                "f1_macro": fold_f1,
+                "auc_macro_ovr": fold_auc,
+            }
+            fold_results.append(result)
+
+            print(
+                f"[F{fold_idx}] ACC={fold_acc:.3f} | "
+                f"F1-macro={fold_f1:.3f} | "
+                f"AUC-macro-OVR={fold_auc:.3f}"
+            )
+
+        acc_values = np.array([r["accuracy"] for r in fold_results], dtype=np.float32)
+        f1_values = np.array([r["f1_macro"] for r in fold_results], dtype=np.float32)
+        auc_values = np.array([r["auc_macro_ovr"] for r in fold_results], dtype=np.float32)
+
+        summary = {
+            "accuracy_mean": float(np.mean(acc_values)),
+            "accuracy_std": float(np.std(acc_values)),
+            "f1_macro_mean": float(np.mean(f1_values)),
+            "f1_macro_std": float(np.std(f1_values)),
+            "auc_macro_ovr_mean": float(np.nanmean(auc_values)),
+            "auc_macro_ovr_std": float(np.nanstd(auc_values)),
+        }
+
+        print("\n===== Résumé cross-validation =====")
+        print(f"ACC       : {summary['accuracy_mean']:.3f} ± {summary['accuracy_std']:.3f}")
+        print(f"F1 macro  : {summary['f1_macro_mean']:.3f} ± {summary['f1_macro_std']:.3f}")
+        print(f"AUC macro : {summary['auc_macro_ovr_mean']:.3f} ± {summary['auc_macro_ovr_std']:.3f}")
+
+        self.cv_results = {"folds": fold_results, "summary": summary}
+        return self.cv_results
 
     def export_onnx(self, onnx_path="models/resnet18_mel_finetuned.onnx", input_shape=(1, 3, 224, 224), opset_version=18):
         if not hasattr(self, "model"):

@@ -26,13 +26,27 @@ class MainResNet18:
         
         print("Ordre des classes :", list(trainer.le.classes_))
 
+    def cross_validation(self, batch_size=16, n_splits=5, epochs_head=3, epochs_finetune=7):
+        trainer = ResNet18Trainer(batch_size=batch_size, num_workers=0, pin_memory=True)
+        results = trainer.cross_validate(
+            n_splits=n_splits,
+            epochs_head=epochs_head,
+            epochs_finetune=epochs_finetune,
+            random_state=42,
+        )
+        print("Resultats CV:", results["summary"])
+
 def main():
     app = MainResNet18()
 
     # À lancer une première fois si spectres.npy n'existe pas encore
-    # app.preprocess()
+    app.preprocess()
 
-    app.training(batch_size=32, epochs_head=8, epochs_finetune=15)
+    # Entraînement classique (split train/val/test)
+    # app.training(batch_size=32, epochs_head=8, epochs_finetune=15)
+
+    # Cross-validation stratifiée (k-fold)
+    app.cross_validation(batch_size=32, n_splits=5, epochs_head=3, epochs_finetune=7)
 
 
 if __name__ == "__main__":
