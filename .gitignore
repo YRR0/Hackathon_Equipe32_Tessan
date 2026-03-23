@@ -23,3 +23,5 @@ phase1.ipynb
 start copy.ipynb
 src/models/resnet18_mel_finetuned.pth
 *.pth
+*.csv
+*.onnx

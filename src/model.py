@@ -241,10 +241,11 @@ class ResNet18Trainer:
         train_indices=None,
         val_indices=None,
         seed=None,
+        verbose_epochs=False,
     ):
         self._set_seed(seed)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self._log(f"{log_prefix}Device utilisée : {device}")
+        # self._log(f"{log_prefix}Device utilisée : {device}")
 
         if device.type == "cpu" and not self._cpu_threads_configured:
             torch.set_num_threads(8)
@@ -281,7 +282,8 @@ class ResNet18Trainer:
         history = []
 
         # Phase 1 : entraînement de la tête uniquement
-        self._log(f"\n{log_prefix}=== Phase 1 : entraînement de la tête ===")
+        if verbose_epochs:
+            self._log(f"\n{log_prefix}=== Phase 1 : entraînement de la tête ===")
         optimizer = torch.optim.Adam(
             filter(lambda p: p.requires_grad, self.model.parameters()),
             lr=lr_head,
@@ -296,11 +298,12 @@ class ResNet18Trainer:
             val_loss, val_acc = self._eval_epoch(self.model, self.val_loader, criterion, device)
             scheduler.step(val_loss)
 
-            self._log(
-                f"{log_prefix}[HEAD] Epoch {epoch+1:02d} | "
-                f"Train loss {train_loss:.3f} acc {train_acc:.3f} | "
-                f"Val loss {val_loss:.3f} acc {val_acc:.3f}"
-            )
+            if verbose_epochs:
+                self._log(
+                    f"{log_prefix}[HEAD] Epoch {epoch+1:02d} | "
+                    f"Train loss {train_loss:.3f} acc {train_acc:.3f} | "
+                    f"Val loss {val_loss:.3f} acc {val_acc:.3f}"
+                )
             best_val_acc = max(best_val_acc, val_acc)
             best_val_loss = min(best_val_loss, val_loss)
             history.append({
@@ -313,7 +316,8 @@ class ResNet18Trainer:
             })
 
         # Phase 2 : fine-tuning de layer4 + fc
-        self._log(f"\n{log_prefix}=== Phase 2 : fine-tuning de layer4 + fc ===")
+        if verbose_epochs:
+            self._log(f"\n{log_prefix}=== Phase 2 : fine-tuning de layer4 + fc ===")
         self.model.unfreeze_last_block()
 
         optimizer = torch.optim.Adam(
@@ -330,11 +334,12 @@ class ResNet18Trainer:
             val_loss, val_acc = self._eval_epoch(self.model, self.val_loader, criterion, device)
             scheduler.step(val_loss)
 
-            self._log(
-                f"{log_prefix}[FT] Epoch {epoch+1:02d} | "
-                f"Train loss {train_loss:.3f} acc {train_acc:.3f} | "
-                f"Val loss {val_loss:.3f} acc {val_acc:.3f}"
-            )
+            if verbose_epochs:
+                self._log(
+                    f"{log_prefix}[FT] Epoch {epoch+1:02d} | "
+                    f"Train loss {train_loss:.3f} acc {train_acc:.3f} | "
+                    f"Val loss {val_loss:.3f} acc {val_acc:.3f}"
+                )
             best_val_acc = max(best_val_acc, val_acc)
             best_val_loss = min(best_val_loss, val_loss)
             history.append({
@@ -345,6 +350,12 @@ class ResNet18Trainer:
                 "val_loss": val_loss,
                 "val_acc": val_acc,
             })
+
+        if not verbose_epochs:
+            self._log(
+                f"{log_prefix}Résumé entraînement | "
+                f"best_val_acc={best_val_acc:.4f} | best_val_loss={best_val_loss:.4f}"
+            )
 
         if save_model:
             model_file = Path(__file__).resolve().parent / "models" / "resnet18_mel_finetuned.pth"
@@ -379,6 +390,7 @@ class ResNet18Trainer:
         max_trials=None,
         random_state=42,
         cv_folds=1,
+        log_epochs=True,
     ):
         if not isinstance(param_grid, dict) or len(param_grid) == 0:
             raise ValueError("param_grid doit être un dict non vide de listes de valeurs.")
@@ -462,11 +474,18 @@ class ResNet18Trainer:
                             train_indices=fold_train_idx,
                             val_indices=fold_val_idx,
                             seed=random_state + idx * 100 + fold,
+                            verbose_epochs=log_epochs,
                         )
                         fold_metrics.append(run_metrics)
                         fold_score = run_metrics.get(metric)
                         if fold_score is not None:
                             fold_scores.append(float(fold_score))
+
+                        self._log(
+                            f"[GS {idx}/{len(combinations)}] Fold {fold}/{cv_folds} terminé | "
+                            f"best_val_acc={run_metrics.get('best_val_acc', float('nan')):.4f} | "
+                            f"best_val_loss={run_metrics.get('best_val_loss', float('nan')):.4f}"
+                        )
 
                     score = float(np.mean(fold_scores)) if len(fold_scores) > 0 else None
                     score_std = float(np.std(fold_scores)) if len(fold_scores) > 0 else None
@@ -484,6 +503,7 @@ class ResNet18Trainer:
                         **train_kwargs,
                         log_prefix=f"[GS {idx}/{len(combinations)}] ",
                         seed=random_state + idx,
+                        verbose_epochs=log_epochs,
                     )
                     score = run_metrics.get(metric)
                     row = {**params, **run_metrics, "score": score}
