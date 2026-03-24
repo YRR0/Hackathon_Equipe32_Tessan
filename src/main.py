@@ -151,10 +151,10 @@ class MainResNet18:
 def main():
     app = MainResNet18()
 
-    app.run_full_pipeline(mode="fixed_5fold", preproc=True, export_final_onnx=True)
+    # app.run_full_pipeline(mode="fixed_5fold", preproc=True, export_final_onnx=True)
     # app.evaluate_on_unseen_test(model_path="models/resnet18_mel_finetuned.pth")
     # app.run_full_pipeline(mode="standard", batch_size=32, epochs_head=5, epochs_finetune=10)
-    # app.predict_file("../data/data_updated/Bronchial/P1BronchialSc_2.wav")
+    app.predict_file("../data/data_original/healthy/P1Healthy29S.wav")
 
 
 if __name__ == "__main__":
