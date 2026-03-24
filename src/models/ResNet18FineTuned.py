@@ -2,34 +2,78 @@ import torch
 import torch.nn as nn
 from torchvision import models
 
-
 class ResNet18FineTuned(nn.Module):
-    def __init__(self, num_classes=5):
+    """
+    Modele hybride: embedding image (ResNet18) + embedding tabulaire, puis concat et classification.
+    """
+
+    def __init__(
+        self,
+        num_classes=5,
+        freeze_backbone=True,
+        tabular_dim=0,
+        image_embed_dim=256,
+        tabular_hidden_dim=128,
+        dropout=0.2,
+    ):
         super().__init__()
 
-        self.backbone = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-        self.backbone.conv1 = nn.Conv2d(1, 64, 7, 2, 3, bias=False)
+        try:
+            self.backbone = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+        except Exception:
+            self.backbone = models.resnet18(pretrained=True)
 
-        # On enlève avgpool et fc
-        self.features = nn.Sequential(*list(self.backbone.children())[:-2])
+        self.tabular_dim = int(tabular_dim)
 
-        self.lstm = nn.LSTM(512, 256, bidirectional=True, batch_first=True)
-        self.attn = nn.Linear(512, 1)
-        self.fc = nn.Linear(512, num_classes)
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
 
-    def forward(self, x):
-        x = self.features(x)  # (B, 512, H, W)
+        in_features = self.backbone.fc.in_features
+        self.backbone.fc = nn.Identity()
 
-        B, C, H, W = x.shape
+        self.image_head = nn.Sequential(
+            nn.Linear(in_features, image_embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
+        )
 
-        # On considère W = temps
-        x = x.mean(dim=2)        # (B, 512, W)
-        x = x.permute(0, 2, 1)   # (B, W, 512)
+        if self.tabular_dim > 0:
+            self.tabular_head = nn.Sequential(
+                nn.Linear(self.tabular_dim, tabular_hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Dropout(p=dropout),
+            )
+            classifier_in = image_embed_dim + tabular_hidden_dim
+        else:
+            self.tabular_head = None
+            classifier_in = image_embed_dim
 
-        x, _ = self.lstm(x)
+        self.classifier = nn.Linear(classifier_in, num_classes)
 
-        # Attention
-        weights = torch.softmax(self.attn(x), dim=1)
-        x = (x * weights).sum(dim=1)
+    def forward(self, x, tabular=None):
+        img_feat = self.backbone(x)
+        img_feat = self.image_head(img_feat)
 
-        return self.fc(x)
+        if self.tabular_head is not None:
+            if tabular is None:
+                tabular = torch.zeros(x.size(0), self.tabular_dim, device=x.device, dtype=img_feat.dtype)
+            tab_feat = self.tabular_head(tabular)
+            fused = torch.cat([img_feat, tab_feat], dim=1)
+        else:
+            fused = img_feat
+
+        return self.classifier(fused)
+
+    def unfreeze_last_block(self):
+        for param in self.backbone.layer4.parameters():
+            param.requires_grad = True
+        for param in self.image_head.parameters():
+            param.requires_grad = True
+        if self.tabular_head is not None:
+            for param in self.tabular_head.parameters():
+                param.requires_grad = True
+        for param in self.classifier.parameters():
+            param.requires_grad = True
+
+
