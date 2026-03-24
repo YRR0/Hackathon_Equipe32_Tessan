@@ -27,6 +27,64 @@ class MainResNet18:
         print("Evaluation")
         trainer.evaluate(model_path="models/resnet18_mel_finetuned.pth")
 
+    def evaluate_on_unseen_test(self, model_path="models/resnet18_mel_finetuned.pth"):
+        """
+        Evaluation uniquement sur le test set (15%) jamais vu pendant l'entrainement.
+        Split interne: 70% train / 15% val / 15% test.
+        """
+        print("\n[EVAL] Evaluation sur test set jamais vu (15%)")
+        trainer = ResNet18Trainer(batch_size=16, num_workers=0, pin_memory=True)
+        trainer.load_data()
+        trainer.build_loaders()
+        trainer.evaluate(model_path=model_path)
+
+    def run_full_pipeline(
+        self,
+        mode="fixed_5fold",
+        preproc=False,
+        batch_size=16,
+        epochs_head=5,
+        epochs_finetune=10,
+        export_final_onnx=True,
+    ):
+        """
+        Pipeline complete en une commande:
+        1) preprocess (regenere spectres.npy avec features tabulaires)
+        2) train + eval selon le mode choisi
+        3) export ONNX optionnel
+        """
+        print("\n[PIPELINE] Step 1/3 - Preprocessing")
+        if preproc:
+            self.preprocess()
+
+        if mode == "fixed_5fold":
+            print("\n[PIPELINE] Step 2/3 - Training (fixed 5-fold + final train)")
+            result = self.train_fixed_params_5fold()
+        elif mode == "standard":
+            print("\n[PIPELINE] Step 2/3 - Training (standard)")
+            self.training(
+                batch_size=batch_size,
+                epochs_head=epochs_head,
+                epochs_finetune=epochs_finetune,
+            )
+            result = {
+                "mode": "standard",
+                "batch_size": batch_size,
+                "epochs_head": epochs_head,
+                "epochs_finetune": epochs_finetune,
+            }
+        else:
+            raise ValueError("mode doit etre 'fixed_5fold' ou 'standard'")
+
+        if export_final_onnx:
+            print("\n[PIPELINE] Step 3/3 - ONNX export")
+            self.export_model_to_onnx(
+                model_path="models/resnet18_mel_finetuned.pth",
+                onnx_path="models/resnet18_mel_finetuned_final.onnx",
+            )
+
+        return result
+
     def predict_file(self, file_path, model_path="models/resnet18_mel_finetuned.pth", top_k=3):
         wav_file = Path(file_path)
         if not wav_file.is_absolute():
@@ -36,6 +94,7 @@ class MainResNet18:
 
         trainer = ResNet18Trainer(batch_size=1, num_workers=0, pin_memory=False)
         trainer.load_data()
+        trainer.build_loaders()
         class_names = list(trainer.le.classes_)
 
         preprocessor = Preprocessor(22050, 6, self.data_root, verbose=False)
@@ -43,13 +102,24 @@ class MainResNet18:
         y = preprocessor.apply_bandpass_filter(y, sr=22050)
         mel = preprocessor.compute_mel_spectrogram(y, sr=22050)
 
+        tab_tensor = None
+        if trainer.tabular_dim > 0 and len(trainer.tabular_feature_names) > 0:
+            feats = preprocessor.extract_all_features(y, sr=22050)
+            tab_vec = np.array([float(feats[name]) for name in trainer.tabular_feature_names], dtype=np.float32)
+            tab_vec = (tab_vec - trainer.tabular_mean) / trainer.tabular_std
+            tab_tensor = torch.tensor(tab_vec, dtype=torch.float32).unsqueeze(0)
+
         mel = np.asarray(mel, dtype=np.float32)
         x = torch.tensor(mel, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
         x = F.interpolate(x, size=(224, 224), mode="bilinear", align_corners=False)
         x = x.squeeze(0).repeat(3, 1, 1).unsqueeze(0)
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = ResNet18FineTuned(num_classes=len(class_names), freeze_backbone=False).to(device)
+        model = ResNet18FineTuned(
+            num_classes=len(class_names),
+            freeze_backbone=False,
+            tabular_dim=trainer.tabular_dim,
+        ).to(device)
 
         model_file = Path(model_path)
         if not model_file.is_absolute():
@@ -64,7 +134,10 @@ class MainResNet18:
         model.eval()
 
         with torch.no_grad():
-            logits = model(x.to(device))
+            if tab_tensor is not None:
+                logits = model(x.to(device), tab_tensor.to(device))
+            else:
+                logits = model(x.to(device), None)
             probs = torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
 
         pred_idx = int(np.argmax(probs))
@@ -92,13 +165,13 @@ class MainResNet18:
         param_grid = {
             "batch_size": [16, 32],
             "epochs_head": [5, 8],
-            "epochs_finetune": [10, 15],
+            "epochs_finetune": [10],
             "lr_head": [1e-3, 5e-4],
             "lr_finetune": [1e-4, 5e-5],
             "weight_decay_head": [0.0, 1e-4],
             "weight_decay_finetune": [0.0, 1e-4],
             "use_class_weights": [True],
-            "gaussian_noise_std": [0.0, 0.01],
+            "gaussian_noise_std": [0.01],
             "time_shift_max": [8, 12],
             "pitch_shift_max": [2, 4],
             "num_time_masks": [1, 2],
@@ -132,7 +205,11 @@ class MainResNet18:
         trainer.load_data()
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = ResNet18FineTuned(num_classes=len(trainer.le.classes_), freeze_backbone=False).to(device)
+        model = ResNet18FineTuned(
+            num_classes=len(trainer.le.classes_),
+            freeze_backbone=False,
+            tabular_dim=trainer.tabular_dim,
+        ).to(device)
 
         model_file = Path(model_path)
         if not model_file.is_absolute():
@@ -157,13 +234,13 @@ class MainResNet18:
         fixed_params = {
             "batch_size": 16,
             "epochs_head": 5,
-            "epochs_finetune": 15,
+            "epochs_finetune": 10,
             "lr_head": 0.001,
             "lr_finetune": 0.0001,
             "weight_decay_head": 0.0,
             "weight_decay_finetune": 0.0,
             "use_class_weights": True,
-            "gaussian_noise_std": 0.0,
+            "gaussian_noise_std": 0.01,
             "time_shift_max": 12,
             "pitch_shift_max": 4,
             "num_time_masks": 1,
@@ -223,7 +300,7 @@ class MainResNet18:
             lr_finetune=fixed_params["lr_finetune"],
             weight_decay_head=fixed_params["weight_decay_head"],
             weight_decay_finetune=fixed_params["weight_decay_finetune"],
-            verbose_epochs=False,
+            verbose_epochs=True,
         )
 
         self.export_model_to_onnx(
@@ -243,12 +320,10 @@ class MainResNet18:
 def main():
     app = MainResNet18()
 
-    # À lancer une première fois si spectres.npy n'existe pas encore
-    # app.preprocess()
-
-    # app.training(batch_size=32, epochs_head=5, epochs_finetune=10)
+    app.run_full_pipeline(mode="fixed_5fold", preproc=False, export_final_onnx=True)
+    # app.evaluate_on_unseen_test(model_path="models/resnet18_mel_finetuned.pth")
+    # app.run_full_pipeline(mode="standard", batch_size=32, epochs_head=5, epochs_finetune=10)
     # app.grid_search(cv_folds=5)
-    app.train_fixed_params_5fold()
     # app.predict_file("../data/data_updated/Bronchial/P1BronchialSc_2.wav")
 
 

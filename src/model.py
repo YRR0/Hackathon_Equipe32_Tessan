@@ -1,5 +1,6 @@
 from pathlib import Path
 from itertools import product
+import csv
 import numpy as np
 import torch
 import torch.nn as nn
@@ -17,10 +18,18 @@ from utils.melresnetdataset import MelResNetDataset
 
 class ResNet18FineTuned(nn.Module):
     """
-    ResNet18 pré-entraîné, adapté à 5 classes.
+    Modele hybride: embedding image (ResNet18) + embedding tabulaire, puis concat et classification.
     """
 
-    def __init__(self, num_classes=5, freeze_backbone=True):
+    def __init__(
+        self,
+        num_classes=5,
+        freeze_backbone=True,
+        tabular_dim=0,
+        image_embed_dim=256,
+        tabular_hidden_dim=128,
+        dropout=0.2,
+    ):
         super().__init__()
 
         try:
@@ -28,26 +37,63 @@ class ResNet18FineTuned(nn.Module):
         except Exception:
             self.backbone = models.resnet18(pretrained=True)
 
+        self.tabular_dim = int(tabular_dim)
+
         if freeze_backbone:
             for param in self.backbone.parameters():
                 param.requires_grad = False
 
         in_features = self.backbone.fc.in_features
-        self.backbone.fc = nn.Linear(in_features, num_classes)
+        self.backbone.fc = nn.Identity()
 
-    def forward(self, x):
-        return self.backbone(x)
+        self.image_head = nn.Sequential(
+            nn.Linear(in_features, image_embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
+        )
+
+        if self.tabular_dim > 0:
+            self.tabular_head = nn.Sequential(
+                nn.Linear(self.tabular_dim, tabular_hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Dropout(p=dropout),
+            )
+            classifier_in = image_embed_dim + tabular_hidden_dim
+        else:
+            self.tabular_head = None
+            classifier_in = image_embed_dim
+
+        self.classifier = nn.Linear(classifier_in, num_classes)
+
+    def forward(self, x, tabular=None):
+        img_feat = self.backbone(x)
+        img_feat = self.image_head(img_feat)
+
+        if self.tabular_head is not None:
+            if tabular is None:
+                tabular = torch.zeros(x.size(0), self.tabular_dim, device=x.device, dtype=img_feat.dtype)
+            tab_feat = self.tabular_head(tabular)
+            fused = torch.cat([img_feat, tab_feat], dim=1)
+        else:
+            fused = img_feat
+
+        return self.classifier(fused)
 
     def unfreeze_last_block(self):
         for param in self.backbone.layer4.parameters():
             param.requires_grad = True
-        for param in self.backbone.fc.parameters():
+        for param in self.image_head.parameters():
+            param.requires_grad = True
+        if self.tabular_head is not None:
+            for param in self.tabular_head.parameters():
+                param.requires_grad = True
+        for param in self.classifier.parameters():
             param.requires_grad = True
 
 
 class ResNet18Trainer:
     """
-    Classe dédiée à l'entraînement et à l'évaluation de ResNet18 sur Mel-spectrogrammes.
+    Classe dediee a l'entrainement et l'evaluation de ResNet18 + features tabulaires.
     """
 
     def __init__(self, batch_size=16, num_workers=0, pin_memory=True):
@@ -55,6 +101,10 @@ class ResNet18Trainer:
         self.num_workers = num_workers
         self.pin_memory = pin_memory
         self._cpu_threads_configured = False
+        self.tabular_dim = 0
+        self.tabular_feature_names = []
+        self.tabular_mean = None
+        self.tabular_std = None
         self.train_aug_params = {
             "gaussian_noise_std": 0.01,
             "time_shift_max": 12,
@@ -76,7 +126,21 @@ class ResNet18Trainer:
         self.mels = self.spectres["mel"]
         self.labels = self.spectres["labels"]
 
-        assert len(self.mels) == len(self.labels), "Désalignement entre mels et labels dans spectres.npy"
+        assert len(self.mels) == len(self.labels), "Desalignement entre mels et labels dans spectres.npy"
+
+        raw_tabular = self.spectres.get("tabular_features")
+        self.tabular_feature_names = list(self.spectres.get("tabular_feature_names", []))
+        if raw_tabular is not None:
+            tabular = np.asarray(raw_tabular, dtype=np.float32)
+            if tabular.ndim == 2 and len(tabular) == len(self.labels) and tabular.shape[1] > 0:
+                self.tabular_features = tabular
+                self.tabular_dim = int(tabular.shape[1])
+            else:
+                self.tabular_features = None
+                self.tabular_dim = 0
+        else:
+            self.tabular_features = None
+            self.tabular_dim = 0
 
         self.le = LabelEncoder()
         self.y_enc = self.le.fit_transform(self.labels)
@@ -93,12 +157,34 @@ class ResNet18Trainer:
         self.test_idx = temp_idx[test_sub_idx]
 
         self._log(f"Train : {len(self.train_idx)} | Val : {len(self.val_idx)} | Test : {len(self.test_idx)}")
+        if self.tabular_dim > 0:
+            self._log(f"Features tabulaires detectees: {self.tabular_dim}")
+
+    def _normalize_tabular_features(self):
+        if self.tabular_features is None:
+            self.tabular_mean = None
+            self.tabular_std = None
+            return None
+
+        train_tab = self.tabular_features[self.train_idx]
+        mean = train_tab.mean(axis=0)
+        std = train_tab.std(axis=0)
+        std = np.where(std < 1e-8, 1.0, std)
+
+        self.tabular_mean = mean.astype(np.float32)
+        self.tabular_std = std.astype(np.float32)
+
+        normalized = (self.tabular_features - self.tabular_mean) / self.tabular_std
+        return normalized.astype(np.float32)
 
     def build_loaders(self):
+        tabular_norm = self._normalize_tabular_features()
+
         train_aug = dict(self.train_aug_params)
         self.train_dataset = MelResNetDataset(
             self.spectres,
             self.y_enc,
+            tabular_features=tabular_norm,
             target_size=(224, 224),
             augment=True,
             **train_aug,
@@ -106,6 +192,7 @@ class ResNet18Trainer:
         self.eval_dataset = MelResNetDataset(
             self.spectres,
             self.y_enc,
+            tabular_features=tabular_norm,
             target_size=(224, 224),
             augment=False,
         )
@@ -115,7 +202,7 @@ class ResNet18Trainer:
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
-            pin_memory=self.pin_memory
+            pin_memory=self.pin_memory,
         )
 
         self.val_loader = DataLoader(
@@ -123,7 +210,7 @@ class ResNet18Trainer:
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            pin_memory=self.pin_memory
+            pin_memory=self.pin_memory,
         )
 
         self.test_loader = DataLoader(
@@ -131,7 +218,7 @@ class ResNet18Trainer:
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            pin_memory=self.pin_memory
+            pin_memory=self.pin_memory,
         )
 
     @staticmethod
@@ -143,17 +230,28 @@ class ResNet18Trainer:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
+    @staticmethod
+    def _unpack_batch(batch):
+        if len(batch) == 3:
+            return batch[0], batch[1], batch[2]
+        if len(batch) == 2:
+            return batch[0], None, batch[1]
+        raise ValueError("Format batch inattendu")
+
     def _train_epoch(self, model, loader, criterion, optimizer, device):
         model.train()
         total_loss = 0.0
         correct = 0
 
-        for X_batch, y_batch in loader:
+        for batch in loader:
+            X_batch, tab_batch, y_batch = self._unpack_batch(batch)
             X_batch = X_batch.to(device)
             y_batch = y_batch.to(device)
+            if tab_batch is not None:
+                tab_batch = tab_batch.to(device)
 
             optimizer.zero_grad()
-            out = model(X_batch)
+            out = model(X_batch, tab_batch)
             loss = criterion(out, y_batch)
             loss.backward()
             optimizer.step()
@@ -169,11 +267,14 @@ class ResNet18Trainer:
         correct = 0
 
         with torch.no_grad():
-            for X_batch, y_batch in loader:
+            for batch in loader:
+                X_batch, tab_batch, y_batch = self._unpack_batch(batch)
                 X_batch = X_batch.to(device)
                 y_batch = y_batch.to(device)
+                if tab_batch is not None:
+                    tab_batch = tab_batch.to(device)
 
-                out = model(X_batch)
+                out = model(X_batch, tab_batch)
                 loss = criterion(out, y_batch)
 
                 total_loss += loss.item()
@@ -183,7 +284,7 @@ class ResNet18Trainer:
 
     def export_onnx(self, onnx_path="models/resnet18_mel_finetuned.onnx", input_shape=(1, 3, 224, 224), opset_version=18):
         if not hasattr(self, "model"):
-            raise RuntimeError("Le modèle n'est pas initialisé. Lance l'entraînement ou charge un checkpoint avant export ONNX.")
+            raise RuntimeError("Le modele n'est pas initialise. Lance l'entrainement ou charge un checkpoint avant export ONNX.")
 
         model_file = Path(onnx_path)
         if not model_file.is_absolute():
@@ -191,26 +292,41 @@ class ResNet18Trainer:
         model_file.parent.mkdir(parents=True, exist_ok=True)
 
         device = next(self.model.parameters()).device
-        dummy_input = torch.randn(*input_shape, device=device)
+        dummy_mel = torch.randn(*input_shape, device=device)
 
         self.model.eval()
+
+        if self.tabular_dim > 0:
+            dummy_tab = torch.randn(input_shape[0], self.tabular_dim, device=device)
+            export_inputs = (dummy_mel, dummy_tab)
+            input_names = ["mel_input", "tabular_input"]
+            dynamic_axes = {
+                "mel_input": {0: "batch_size"},
+                "tabular_input": {0: "batch_size"},
+                "logits": {0: "batch_size"},
+            }
+        else:
+            export_inputs = dummy_mel
+            input_names = ["mel_input"]
+            dynamic_axes = {
+                "mel_input": {0: "batch_size"},
+                "logits": {0: "batch_size"},
+            }
+
         export_kwargs = dict(
             export_params=True,
             opset_version=opset_version,
             do_constant_folding=True,
-            input_names=["input"],
+            input_names=input_names,
             output_names=["logits"],
-            dynamic_axes={
-                "input": {0: "batch_size"},
-                "logits": {0: "batch_size"},
-            },
+            dynamic_axes=dynamic_axes,
         )
 
         with torch.no_grad():
             try:
                 torch.onnx.export(
                     self.model,
-                    dummy_input,
+                    export_inputs,
                     str(model_file),
                     dynamo=False,
                     **export_kwargs,
@@ -218,12 +334,12 @@ class ResNet18Trainer:
             except TypeError:
                 torch.onnx.export(
                     self.model,
-                    dummy_input,
+                    export_inputs,
                     str(model_file),
                     **export_kwargs,
                 )
 
-        print(f"Modèle ONNX exporté dans {model_file}")
+        print(f"Modele ONNX exporte dans {model_file}")
 
     def train(
         self,
@@ -245,7 +361,6 @@ class ResNet18Trainer:
     ):
         self._set_seed(seed)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # self._log(f"{log_prefix}Device utilisée : {device}")
 
         if device.type == "cpu" and not self._cpu_threads_configured:
             torch.set_num_threads(8)
@@ -266,14 +381,15 @@ class ResNet18Trainer:
             class_weights = compute_class_weight(
                 class_weight="balanced",
                 classes=np.unique(self.y_enc),
-                y=self.y_enc[self.train_idx]
+                y=self.y_enc[self.train_idx],
             )
             weights_tensor = torch.FloatTensor(class_weights).to(device)
             self._log(f"{log_prefix}Class weights: {np.round(class_weights, 3)}")
 
         self.model = ResNet18FineTuned(
             num_classes=len(self.le.classes_),
-            freeze_backbone=True
+            freeze_backbone=True,
+            tabular_dim=self.tabular_dim,
         ).to(device)
 
         criterion = nn.CrossEntropyLoss(weight=weights_tensor)
@@ -281,9 +397,8 @@ class ResNet18Trainer:
         best_val_loss = float("inf")
         history = []
 
-        # Phase 1 : entraînement de la tête uniquement
         if verbose_epochs:
-            self._log(f"\n{log_prefix}=== Phase 1 : entraînement de la tête ===")
+            self._log(f"\n{log_prefix}=== Phase 1 : entrainement de la tete ===")
         optimizer = torch.optim.Adam(
             filter(lambda p: p.requires_grad, self.model.parameters()),
             lr=lr_head,
@@ -306,18 +421,19 @@ class ResNet18Trainer:
                 )
             best_val_acc = max(best_val_acc, val_acc)
             best_val_loss = min(best_val_loss, val_loss)
-            history.append({
-                "phase": "head",
-                "epoch": epoch + 1,
-                "train_loss": train_loss,
-                "train_acc": train_acc,
-                "val_loss": val_loss,
-                "val_acc": val_acc,
-            })
+            history.append(
+                {
+                    "phase": "head",
+                    "epoch": epoch + 1,
+                    "train_loss": train_loss,
+                    "train_acc": train_acc,
+                    "val_loss": val_loss,
+                    "val_acc": val_acc,
+                }
+            )
 
-        # Phase 2 : fine-tuning de layer4 + fc
         if verbose_epochs:
-            self._log(f"\n{log_prefix}=== Phase 2 : fine-tuning de layer4 + fc ===")
+            self._log(f"\n{log_prefix}=== Phase 2 : fine-tuning de layer4 + tete ===")
         self.model.unfreeze_last_block()
 
         optimizer = torch.optim.Adam(
@@ -342,18 +458,20 @@ class ResNet18Trainer:
                 )
             best_val_acc = max(best_val_acc, val_acc)
             best_val_loss = min(best_val_loss, val_loss)
-            history.append({
-                "phase": "finetune",
-                "epoch": epoch + 1,
-                "train_loss": train_loss,
-                "train_acc": train_acc,
-                "val_loss": val_loss,
-                "val_acc": val_acc,
-            })
+            history.append(
+                {
+                    "phase": "finetune",
+                    "epoch": epoch + 1,
+                    "train_loss": train_loss,
+                    "train_acc": train_acc,
+                    "val_loss": val_loss,
+                    "val_acc": val_acc,
+                }
+            )
 
         if not verbose_epochs:
             self._log(
-                f"{log_prefix}Résumé entraînement | "
+                f"{log_prefix}Resume entrainement | "
                 f"best_val_acc={best_val_acc:.4f} | best_val_loss={best_val_loss:.4f}"
             )
 
@@ -361,7 +479,7 @@ class ResNet18Trainer:
             model_file = Path(__file__).resolve().parent / "models" / "resnet18_mel_finetuned.pth"
             model_file.parent.mkdir(parents=True, exist_ok=True)
             torch.save(self.model.state_dict(), model_file)
-            self._log(f"{log_prefix}Modèle sauvegardé dans {model_file}")
+            self._log(f"{log_prefix}Modele sauvegarde dans {model_file}")
 
             self.export_onnx(onnx_path="models/resnet18_mel_finetuned.onnx")
 
@@ -393,17 +511,17 @@ class ResNet18Trainer:
         log_epochs=True,
     ):
         if not isinstance(param_grid, dict) or len(param_grid) == 0:
-            raise ValueError("param_grid doit être un dict non vide de listes de valeurs.")
+            raise ValueError("param_grid doit etre un dict non vide de listes de valeurs.")
 
         for key, value in param_grid.items():
             if not isinstance(value, (list, tuple)) or len(value) == 0:
-                raise ValueError(f"param_grid['{key}'] doit être une liste/tuple non vide.")
+                raise ValueError(f"param_grid['{key}'] doit etre une liste/tuple non vide.")
 
         model_dir = Path(__file__).resolve().parent / "models"
         model_dir.mkdir(parents=True, exist_ok=True)
 
         if cv_folds < 1:
-            raise ValueError("cv_folds doit être >= 1.")
+            raise ValueError("cv_folds doit etre >= 1.")
 
         cv_pool_idx = None
         cv_pool_y = None
@@ -415,7 +533,7 @@ class ResNet18Trainer:
             min_count = int(class_counts.min()) if len(class_counts) > 0 else 0
             if min_count < cv_folds:
                 raise ValueError(
-                    f"Impossible d'utiliser cv_folds={cv_folds}: une classe n'a que {min_count} échantillon(s) dans train+val."
+                    f"Impossible d'utiliser cv_folds={cv_folds}: une classe n'a que {min_count} echantillon(s) dans train+val."
                 )
 
         original_batch_size = self.batch_size
@@ -430,8 +548,8 @@ class ResNet18Trainer:
             rng = np.random.default_rng(random_state)
             sampled_idx = rng.choice(len(combinations), size=max_trials, replace=False)
             combinations = [combinations[i] for i in sampled_idx]
-            self._log(f"Sous-échantillonnage grid search: {max_trials} combinaisons retenues")
-        self._log(f"\nGrid search: {len(combinations)} combinaisons à tester")
+            self._log(f"Sous-echantillonnage grid search: {max_trials} combinaisons retenues")
+        self._log(f"\nGrid search: {len(combinations)} combinaisons a tester")
 
         for idx, params in enumerate(combinations, start=1):
             self._log(f"\n--- Combo {idx}/{len(combinations)} ---")
@@ -462,7 +580,6 @@ class ResNet18Trainer:
             try:
                 if cv_folds > 1:
                     skf = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
-                    fold_metrics = []
                     fold_scores = []
 
                     for fold, (train_rel, val_rel) in enumerate(skf.split(cv_pool_idx, cv_pool_y), start=1):
@@ -476,13 +593,12 @@ class ResNet18Trainer:
                             seed=random_state + idx * 100 + fold,
                             verbose_epochs=log_epochs,
                         )
-                        fold_metrics.append(run_metrics)
                         fold_score = run_metrics.get(metric)
                         if fold_score is not None:
                             fold_scores.append(float(fold_score))
 
                         self._log(
-                            f"[GS {idx}/{len(combinations)}] Fold {fold}/{cv_folds} terminé | "
+                            f"[GS {idx}/{len(combinations)}] Fold {fold}/{cv_folds} termine | "
                             f"best_val_acc={run_metrics.get('best_val_acc', float('nan')):.4f} | "
                             f"best_val_loss={run_metrics.get('best_val_loss', float('nan')):.4f}"
                         )
@@ -537,16 +653,15 @@ class ResNet18Trainer:
                 all_keys.update(row.keys())
             columns = sorted(all_keys)
 
-            import csv
             with open(output_file, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=columns)
                 writer.writeheader()
                 writer.writerows(results)
 
-            self._log(f"Résultats grid search sauvegardés dans {output_file}")
+            self._log(f"Resultats grid search sauvegardes dans {output_file}")
 
         if best_result is None:
-            self._log("Aucune combinaison valide trouvée.")
+            self._log("Aucune combinaison valide trouvee.")
         else:
             self._log(f"\nMeilleure combinaison ({metric}): {best_score}")
             self._log(str(best_result))
@@ -563,7 +678,8 @@ class ResNet18Trainer:
         if not hasattr(self, "model"):
             self.model = ResNet18FineTuned(
                 num_classes=len(self.le.classes_),
-                freeze_backbone=False
+                freeze_backbone=False,
+                tabular_dim=self.tabular_dim,
             ).to(device)
 
         model_file = Path(model_path)
@@ -582,11 +698,14 @@ class ResNet18Trainer:
         all_preds, all_probs, all_true = [], [], []
 
         with torch.no_grad():
-            for X_batch, y_batch in self.test_loader:
+            for batch in self.test_loader:
+                X_batch, tab_batch, y_batch = self._unpack_batch(batch)
                 X_batch = X_batch.to(device)
                 y_batch = y_batch.to(device)
+                if tab_batch is not None:
+                    tab_batch = tab_batch.to(device)
 
-                out = self.model(X_batch)
+                out = self.model(X_batch, tab_batch)
                 probs = torch.softmax(out, dim=1)
 
                 all_preds.extend(out.argmax(1).cpu().numpy())
@@ -597,12 +716,14 @@ class ResNet18Trainer:
         all_probs = np.array(all_probs)
         all_true = np.array(all_true)
 
-        print(classification_report(
-            all_true,
-            all_preds,
-            target_names=self.le.classes_,
-            zero_division=0
-        ))
+        print(
+            classification_report(
+                all_true,
+                all_preds,
+                target_names=self.le.classes_,
+                zero_division=0,
+            )
+        )
 
         f1_macro = f1_score(all_true, all_preds, average="macro")
         print(f"Macro F1-score : {f1_macro:.3f}")
@@ -618,10 +739,10 @@ class ResNet18Trainer:
             fmt="d",
             cmap="Blues",
             xticklabels=self.le.classes_,
-            yticklabels=self.le.classes_
+            yticklabels=self.le.classes_,
         )
-        plt.title("Matrice de confusion — test set")
-        plt.ylabel("Réel")
-        plt.xlabel("Prédit")
+        plt.title("Matrice de confusion - test set")
+        plt.ylabel("Reel")
+        plt.xlabel("Predit")
         plt.tight_layout()
         plt.show()

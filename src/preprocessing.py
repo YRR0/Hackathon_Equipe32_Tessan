@@ -34,6 +34,7 @@ class Preprocessor:
         self.n_mels = n_mels
         self.n_mfcc = n_mfcc
         self.verbose = verbose
+        self.silence_threshold = 1e-3
 
     def preprocess_audio_dataset(self, target_sr: int, target_duration_sec: float, input_root: str = "../data"):
         input_root = Path(input_root)
@@ -187,7 +188,60 @@ class Preprocessor:
         rms = librosa.feature.rms(y=y)
         features['rms_mean'] = float(rms.mean())
         features['rms_std']  = float(rms.std())
+        advanced = self.extract_advanced_features(y, sr=sr, threshold=self.silence_threshold)
+        features.update(advanced)
         return features  # dict de ~32 valeurs numériques
+
+    def extract_advanced_features(self, y, sr=22050, threshold=1e-3):
+        """Features avancées pour concaténation avec l'embedding ResNet."""
+        features = {}
+
+        rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)
+        features["rolloff_mean"] = float(rolloff.mean())
+        features["rolloff_std"] = float(rolloff.std())
+
+        contrast = librosa.feature.spectral_contrast(y=y, sr=sr)
+        for i in range(contrast.shape[0]):
+            features[f"contrast_{i}_mean"] = float(contrast[i].mean())
+            features[f"contrast_{i}_std"] = float(contrast[i].std())
+
+        tonnetz = librosa.feature.tonnetz(y=y, sr=sr)
+        for i in range(tonnetz.shape[0]):
+            features[f"tonnetz_{i}_mean"] = float(tonnetz[i].mean())
+            features[f"tonnetz_{i}_std"] = float(tonnetz[i].std())
+
+        mfcc = librosa.feature.mfcc(y=y, sr=sr)
+        for i in range(mfcc.shape[0]):
+            features[f"mfcc_full_{i}_mean"] = float(mfcc[i].mean())
+            features[f"mfcc_full_{i}_std"] = float(mfcc[i].std())
+
+        delta = librosa.feature.delta(mfcc)
+        for i in range(delta.shape[0]):
+            features[f"delta_{i}_mean"] = float(delta[i].mean())
+            features[f"delta_{i}_std"] = float(delta[i].std())
+
+        delta2 = librosa.feature.delta(mfcc, order=2)
+        for i in range(delta2.shape[0]):
+            features[f"delta2_{i}_mean"] = float(delta2[i].mean())
+            features[f"delta2_{i}_std"] = float(delta2[i].std())
+
+        rms = librosa.feature.rms(y=y)
+        features["rms_var"] = float(np.var(rms))
+
+        silence_ratio = np.mean(np.abs(y) < threshold)
+        features["silence_ratio"] = float(silence_ratio)
+
+        fft = np.abs(np.fft.rfft(y))
+        peak_freq = int(np.argmax(fft))
+        peak_freq_hz = float(peak_freq * sr / max(1, len(y)))
+        features["peak_freq_bin"] = float(peak_freq)
+        features["peak_freq_hz"] = peak_freq_hz
+
+        return features
+
+    @staticmethod
+    def _features_to_vector(features_dict, feature_names):
+        return np.array([float(features_dict[name]) for name in feature_names], dtype=np.float32)
     
         
     def spectres_creation_and_save(self):
@@ -203,6 +257,8 @@ class Preprocessor:
         all_zcrs = []
         all_chromas = []
         all_labels = []
+        tabular_feature_names = None
+        all_tabular_features = []
         if self.verbose:
             print("Normalizing dataset to fixed duration...")
         fix_duration_df, processed_root = self.preprocess_audio_dataset(
@@ -250,6 +306,12 @@ class Preprocessor:
                     feats['filename'] = wav_file
                     all_features.append(feats)
 
+                    if tabular_feature_names is None:
+                        tabular_feature_names = sorted(
+                            [k for k in feats.keys() if k not in {"label", "filename"}]
+                        )
+                    all_tabular_features.append(self._features_to_vector(feats, tabular_feature_names))
+
                     all_labels.append(label)
 
                 except Exception as e:
@@ -263,6 +325,8 @@ class Preprocessor:
             "zcr": all_zcrs,
             "chroma": all_chromas,
             "labels": all_labels,
+            "tabular_features": np.stack(all_tabular_features).astype(np.float32) if len(all_tabular_features) > 0 else np.empty((0, 0), dtype=np.float32),
+            "tabular_feature_names": tabular_feature_names if tabular_feature_names is not None else [],
         }
         output_file = self.input_root / "spectres.npy"
         np.save(output_file, spectres, allow_pickle=True)

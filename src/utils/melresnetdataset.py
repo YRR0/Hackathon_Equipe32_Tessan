@@ -14,6 +14,7 @@ class MelResNetDataset(Dataset):
         self,
         spectres,
         labels_encoded,
+        tabular_features=None,
         target_size=(224, 224),
         augment=False,
         gaussian_noise_std=0.01,
@@ -26,6 +27,11 @@ class MelResNetDataset(Dataset):
     ):
         self.mels = spectres["mel"]
         self.y = torch.LongTensor(labels_encoded)
+        self.tabular_features = None
+        if tabular_features is not None:
+            self.tabular_features = np.asarray(tabular_features, dtype=np.float32)
+            if len(self.tabular_features) != len(self.y):
+                raise ValueError("tabular_features et labels doivent avoir la même longueur")
         self.target_size = target_size
         self.augment = augment
 
@@ -126,4 +132,8 @@ class MelResNetDataset(Dataset):
         # Répéter en 3 canaux
         x = x.repeat(3, 1, 1)  # (3, 224, 224)
 
-        return x, self.y[idx]
+        if self.tabular_features is None:
+            return x, self.y[idx]
+
+        tab = torch.tensor(self.tabular_features[idx], dtype=torch.float32)
+        return x, tab, self.y[idx]
