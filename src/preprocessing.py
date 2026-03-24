@@ -118,34 +118,50 @@ class Preprocessor:
         mel_norm = (mel_db - mel_db.min()) / (mel_db.max() - mel_db.min() + 1e-8)
         return mel_norm.astype(np.float32)
     
-    def compute_mfcc_spectrogram(self, y, sr=22050, n_mfcc=20):
-        """MFCC - Mel-Frequency Cepstral Coefficients (20 coeffs)"""
-        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=self.n_mfcc)
+    def compute_mfcc_spectrogram(self, y, sr=22050):
+        # Aligné avec la méthode de l'UDF Snowflake
+        S = np.abs(librosa.stft(y, n_fft=self.n_fft, hop_length=self.hop_length)) ** 2
+        mel_spec = librosa.feature.melspectrogram(
+            S=S, sr=sr, n_fft=self.n_fft, hop_length=self.hop_length, n_mels=self.n_mels
+        )
+        mfcc = librosa.feature.mfcc(S=librosa.power_to_db(mel_spec), sr=sr, n_mfcc=self.n_mfcc)
         mfcc_db = librosa.power_to_db(mfcc, ref=np.max)
         mfcc_norm = (mfcc_db - mfcc_db.min()) / (mfcc_db.max() - mfcc_db.min() + 1e-8)
         return mfcc_norm  # shape : (13, temps)
 
     def compute_spectral_centroid_spectrogram(self, y, sr=22050):
-        """Spectral Centroid - centre de gravité fréquentiel"""
-        centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
+        # Aligné Snowflake (utilise S_amp = sqrt(S))
+        S = np.abs(librosa.stft(y, n_fft=self.n_fft, hop_length=self.hop_length))
+        centroid = librosa.feature.spectral_centroid(S=S, sr=sr)
         centroid_norm = (centroid - centroid.min()) / (centroid.max() - centroid.min() + 1e-8)
         return centroid_norm  # shape : (1, temps)
 
     def compute_spectral_bandwidth_spectrogram(self, y, sr=22050):
-        """Spectral Bandwidth - largeur du spectre"""
-        bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr)
+        # Aligné Snowflake (utilise S_amp = sqrt(S))
+        S = np.abs(librosa.stft(y, n_fft=self.n_fft, hop_length=self.hop_length))
+        bandwidth = librosa.feature.spectral_bandwidth(S=S, sr=sr)
         bandwidth_norm = (bandwidth - bandwidth.min()) / (bandwidth.max() - bandwidth.min() + 1e-8)
         return bandwidth_norm  # shape : (1, temps)
 
     def compute_zcr_spectrogram(self, y, sr=22050):
-        """Zero-Crossing Rate - nb de changement de signe"""
-        zcr = librosa.feature.zero_crossing_rate(y)
+        # ZCR natif contournant Numba (identique Snowflake)
+        FRAME_LEN = self.n_fft
+        HOP_LENGTH = self.hop_length
+        n_zcr_frames = 1 + (len(y) - FRAME_LEN) // HOP_LENGTH
+        zcr = np.zeros(max(n_zcr_frames, 1), dtype=np.float32)
+        for i in range(max(n_zcr_frames, 1)):
+            frame = y[i * HOP_LENGTH : i * HOP_LENGTH + FRAME_LEN]
+            if len(frame) > 1:
+                zcr[i] = np.mean(np.abs(np.diff(np.sign(frame))) > 0)
+        # Reshape for consistency if needed, but normally ZCR is returned as a 2D array by librosa
+        zcr = zcr.reshape(1, -1)
         zcr_norm = (zcr - zcr.min()) / (zcr.max() - zcr.min() + 1e-8)
         return zcr_norm  # shape : (1, temps)
     
     def compute_chroma_spectrogram(self, y, sr=22050):
-        """Chroma - énergie par note musicale (12 notes)"""
-        chroma = librosa.feature.chroma_stft(y=y, sr=sr)
+        # Aligné Snowflake (utilise S = |STFT|^2)
+        S = np.abs(librosa.stft(y, n_fft=self.n_fft, hop_length=self.hop_length)) ** 2
+        chroma = librosa.feature.chroma_stft(S=S, sr=sr, tuning=0)
         chroma_norm = (chroma - chroma.min()) / (chroma.max() - chroma.min() + 1e-8)
         return chroma_norm  # shape : (12, temps)
 
@@ -156,61 +172,74 @@ class Preprocessor:
         high = highcut / nyquist
 
         b, a = scipy_signal.butter(N=4, Wn=[low, high], btype='band')
-        y_filtered = scipy_signal.filtfilt(b, a, y)  # filtfilt = sans déphasage OU .trim
+        y_filtered = scipy_signal.filtfilt(b, a, y).astype(np.float32)
 
         return y_filtered
 
-
     def extract_all_features(self, y, sr=22050):
         features = {}
-        # MFCC — 13 coefficients qui résument l'enveloppe spectrale
-        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+        # Pré-calculs stricts (mimant l'UDF Snowflake)
+        S_power = np.abs(librosa.stft(y, n_fft=self.n_fft, hop_length=self.hop_length)) ** 2
+        S_amp = np.sqrt(S_power)
+        mel_spec = librosa.feature.melspectrogram(
+            S=S_power, sr=sr, n_fft=self.n_fft, hop_length=self.hop_length, n_mels=self.n_mels
+        )
+
+        mfcc = librosa.feature.mfcc(S=librosa.power_to_db(mel_spec), sr=sr, n_mfcc=13)
         for i in range(13):
             features[f'mfcc_{i}_mean'] = float(mfcc[i].mean())
             features[f'mfcc_{i}_std']  = float(mfcc[i].std())
-        # Spectral Centroid — "centre de gravité" fréquentiel
-        # élevé = sons aigus (sifflements asthme), bas = sons graves (ronchi BPCO)
-        centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
+
+        centroid = librosa.feature.spectral_centroid(S=S_amp, sr=sr)
         features['centroid_mean'] = float(centroid.mean())
         features['centroid_std']  = float(centroid.std())
-        # Spectral Bandwidth — largeur du spectre autour du centroid
-        bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr)
+
+        bandwidth = librosa.feature.spectral_bandwidth(S=S_amp, sr=sr)
         features['bandwidth_mean'] = float(bandwidth.mean())
-        # Zero Crossing Rate — nb de fois que le signal change de signe
-        # élevé = sons bruités (crépitements pneumonie)
-        zcr = librosa.feature.zero_crossing_rate(y)
-        features['zcr_mean'] = float(zcr.mean())
-        features['zcr_std']  = float(zcr.std())
-        # Chroma — énergie par note musicale (12 notes)
-        chroma = librosa.feature.chroma_stft(y=y, sr=sr)
+
+        # ZCR manuel sans numba
+        FRAME_LEN = self.n_fft
+        HOP_LENGTH = self.hop_length
+        n_zcr_frames = 1 + (len(y) - FRAME_LEN) // HOP_LENGTH
+        zcr_vals = np.zeros(max(n_zcr_frames, 1), dtype=np.float32)
+        for i in range(max(n_zcr_frames, 1)):
+            frame = y[i * HOP_LENGTH : i * HOP_LENGTH + FRAME_LEN]
+            if len(frame) > 1:
+                zcr_vals[i] = np.mean(np.abs(np.diff(np.sign(frame))) > 0)
+        
+        features['zcr_mean'] = float(zcr_vals.mean())
+        features['zcr_std']  = float(zcr_vals.std())
+
+        chroma = librosa.feature.chroma_stft(S=S_power, sr=sr, tuning=0)
         features['chroma_mean'] = float(chroma.mean())
-        # RMS Energy — énergie moyenne du signal
-        rms = librosa.feature.rms(y=y)
+
+        rms = librosa.feature.rms(S=S_power)
         features['rms_mean'] = float(rms.mean())
         features['rms_std']  = float(rms.std())
-        advanced = self.extract_advanced_features(y, sr=sr, threshold=self.silence_threshold)
-        features.update(advanced)
-        return features  # dict de ~32 valeurs numériques
 
-    def extract_advanced_features(self, y, sr=22050, threshold=1e-3):
+        advanced = self.extract_advanced_features(y, S_power, S_amp, mel_spec, chroma, sr=sr, threshold=self.silence_threshold)
+        features.update(advanced)
+        return features  # dict de ~186 valeurs numériques
+
+    def extract_advanced_features(self, y, S_power, S_amp, mel_spec, chroma, sr=22050, threshold=1e-3):
         """Features avancées pour concaténation avec l'embedding ResNet."""
         features = {}
 
-        rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)
+        rolloff = librosa.feature.spectral_rolloff(S=S_amp, sr=sr)
         features["rolloff_mean"] = float(rolloff.mean())
         features["rolloff_std"] = float(rolloff.std())
 
-        contrast = librosa.feature.spectral_contrast(y=y, sr=sr)
+        contrast = librosa.feature.spectral_contrast(S=S_power, sr=sr)
         for i in range(contrast.shape[0]):
             features[f"contrast_{i}_mean"] = float(contrast[i].mean())
             features[f"contrast_{i}_std"] = float(contrast[i].std())
 
-        tonnetz = librosa.feature.tonnetz(y=y, sr=sr)
+        tonnetz = librosa.feature.tonnetz(chroma=chroma)
         for i in range(tonnetz.shape[0]):
             features[f"tonnetz_{i}_mean"] = float(tonnetz[i].mean())
             features[f"tonnetz_{i}_std"] = float(tonnetz[i].std())
 
-        mfcc = librosa.feature.mfcc(y=y, sr=sr)
+        mfcc = librosa.feature.mfcc(S=librosa.power_to_db(mel_spec), sr=sr)
         for i in range(mfcc.shape[0]):
             features[f"mfcc_full_{i}_mean"] = float(mfcc[i].mean())
             features[f"mfcc_full_{i}_std"] = float(mfcc[i].std())
@@ -225,7 +254,7 @@ class Preprocessor:
             features[f"delta2_{i}_mean"] = float(delta2[i].mean())
             features[f"delta2_{i}_std"] = float(delta2[i].std())
 
-        rms = librosa.feature.rms(y=y)
+        rms = librosa.feature.rms(S=S_power)
         features["rms_var"] = float(np.var(rms))
 
         silence_ratio = np.mean(np.abs(y) < threshold)

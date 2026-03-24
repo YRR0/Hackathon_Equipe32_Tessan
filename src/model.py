@@ -305,6 +305,19 @@ class ResNet18Trainer:
                 "tabular_input": {0: "batch_size"},
                 "logits": {0: "batch_size"},
             }
+            
+            # === EXPORT DU SCALER TABULAIRE POUR SNOWFLAKE ===
+            import json
+            scaler_path = model_file.parent / "tabular_scaler.json"
+            scaler_data = {
+                "feature_names": self.tabular_feature_names,
+                "mean": self.tabular_mean.tolist() if self.tabular_mean is not None else [],
+                "std": self.tabular_std.tolist() if self.tabular_std is not None else []
+            }
+            with open(scaler_path, "w") as f:
+                json.dump(scaler_data, f)
+            print(f"Scaler tabulaire exporte dans {scaler_path}")
+            
         else:
             export_inputs = dummy_mel
             input_names = ["mel_input"]
@@ -348,6 +361,7 @@ class ResNet18Trainer:
     ):
         """Charge un checkpoint .pth et l'exporte en ONNX."""
         self.load_data()
+        self.build_loaders()  # Reconstruit les splits pour générer tabular_mean / std de manière déterministe
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = ResNet18FineTuned(

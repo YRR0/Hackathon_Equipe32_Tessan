@@ -65,8 +65,8 @@ class MainResNet18:
 
         if export_final_onnx:
             print("\n[PIPELINE] Step 3/3 - ONNX export")
-            exporter = ResNet18Trainer(batch_size=1, num_workers=0, pin_memory=False)
-            exporter.export_checkpoint_to_onnx(
+            # Exporter via le même trainer pour garder les paramètres de scaling
+            trainer.export_checkpoint_to_onnx(
                 model_path="models/resnet18_mel_finetuned.pth",
                 onnx_path="models/resnet18_mel_finetuned.onnx",
             )
@@ -151,10 +151,11 @@ class MainResNet18:
 def main():
     app = MainResNet18()
 
-    app.run_full_pipeline(mode="fixed_5fold", preproc=True, export_final_onnx=True)
-    # app.evaluate_on_unseen_test(model_path="models/resnet18_mel_finetuned.pth")
-    # app.run_full_pipeline(mode="standard", batch_size=32, epochs_head=5, epochs_finetune=10)
-    # app.predict_file("../data/data_updated/Bronchial/P1BronchialSc_2.wav")
+    # Re-générer les features de tout le dossier dataset avec la nouvelle méthode sans Numba
+    #app.run_full_pipeline(mode="fixed_5fold", preproc=True, export_final_onnx=True)
+    
+    # Prédiction pour vérification post-entrainement
+    app.predict_file("../data/data_updated/healthy/P1Healthy29S.wav")
 
 
 if __name__ == "__main__":
