@@ -742,10 +742,9 @@ st.markdown(f"""
 # ── Credibility strip ─────────────────────────────────────────────
 st.markdown("""
 <div class="credibility-strip">
-  <div class="cred-item">🧪 <strong>Modèle clinique</strong> · Entraîné sur données validées</div>
-  <div class="cred-item">🏅 <strong>85% précision</strong> · AUC-ROC 0.981</div>
-  <div class="cred-item">🔬 <strong>5 pathologies</strong> · Asthme, BPCO, Bronchite, Pneumonie, Sain</div>
-  <div class="cred-item">⚕️ Ce diagnostic <strong>ne remplace pas</strong> un avis médical</div>
+  <div class="cred-item"> <strong>Modèle clinique</strong> · Entraîné sur données validées</div>
+  <div class="cred-item"> <strong>5 pathologies</strong> · Asthme, BPCO, Bronchite, Pneumonie, Sain</div>
+  <div class="cred-item"> Ce diagnostic <strong>ne remplace pas</strong> un avis médical</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -909,7 +908,7 @@ if uploaded:
     </div>
     """, unsafe_allow_html=True)
 
-    analyze_btn = st.button("🔬 Lancer l'analyse respiratoire", type="primary", use_container_width=True)
+    analyze_btn = st.button(" Lancer l'analyse respiratoire", type="primary", use_container_width=True)
 
     if analyze_btn:
 
@@ -969,29 +968,29 @@ if uploaded:
         """, unsafe_allow_html=True)
 
         # ─── SECONDARY: Recommendation ────────────────────────────
-        st.markdown(f"""
-        <div class="reco-block">
-          <div class="reco-icon">💬</div>
-          <div>
-            <div class="reco-title">Recommandation</div>
-            <div class="reco-text">{reco_text}</div>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+        if is_patient:
+            st.markdown(f"""
+            <div class="reco-block">
+              <div>
+                <div class="reco-title">Recommandation</div>
+                <div class="reco-text">{reco_text}</div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
 
-        # CTA buttons
-        col_cta1, col_cta2 = st.columns(2)
-        with col_cta1:
-            st.button("📅 Prendre rendez-vous", use_container_width=True)
-        with col_cta2:
-            st.button("📄 Générer un compte rendu", use_container_width=True)
+            # CTA buttons
+            col_cta1, col_cta2 = st.columns(2)
+            with col_cta1:
+                st.button(" Prendre rendez-vous", use_container_width=True)
+            with col_cta2:
+                st.button(" Générer un compte rendu", use_container_width=True)
 
-        # Disclaimer
-        st.markdown("""
-        <div class="disclaimer">
-          ⚠️ Ce résultat est fourni à titre indicatif. Il ne remplace pas un diagnostic médical établi par un professionnel de santé.
-        </div>
-        """, unsafe_allow_html=True)
+            # Disclaimer
+            st.markdown("""
+            <div class="disclaimer">
+              ⚠️ Ce résultat est fourni à titre indicatif. Il ne remplace pas un diagnostic médical établi par un professionnel de santé.
+            </div>
+            """, unsafe_allow_html=True)
 
         # ── Diagnostic secondaire ─────────────────────────────────
         second      = result.get('second_class', '')
@@ -1095,93 +1094,94 @@ if uploaded:
             pass  # Non-blocking
 
 
-# ── Dashboard épidémiologique ─────────────────────────────────────
-st.divider()
-st.markdown('<span class="section-label">Surveillance épidémiologique · Réseau Tessan</span>', unsafe_allow_html=True)
+if not is_patient:
+    # ── Dashboard épidémiologique ─────────────────────────────────────
+    st.divider()
+    st.markdown('<span class="section-label">Surveillance épidémiologique · Réseau Tessan</span>', unsafe_allow_html=True)
 
-total = session.sql("SELECT COUNT(*) as nb FROM predictions").collect()[0]['NB']
+    total = session.sql("SELECT COUNT(*) as nb FROM predictions").collect()[0]['NB']
 
-if total == 0:
-    st.markdown("""
-    <div class="card" style="text-align:center;padding:3rem;color:#3A5080;">
-      <div style="font-size:2rem;margin-bottom:0.75rem;">📊</div>
-      <div style="font-size:0.85rem;">Aucune donnée de prédiction disponible.<br>Effectuez votre premier diagnostic ci-dessus.</div>
-    </div>
-    """, unsafe_allow_html=True)
-else:
-    top = session.sql("""
-        SELECT predicted_class, COUNT(*) as nb
-        FROM predictions GROUP BY predicted_class ORDER BY nb DESC LIMIT 1
-    """).collect()[0]
-    conf_moy = session.sql("""
-        SELECT ROUND(AVG(confidence)*100, 1) as moy FROM predictions
-    """).collect()[0]['MOY']
-    top_fr = CLASS_LABELS_FR_SHORT.get(top['PREDICTED_CLASS'], top['PREDICTED_CLASS'].upper())
+    if total == 0:
+        st.markdown("""
+        <div class="card" style="text-align:center;padding:3rem;color:#3A5080;">
+          <div style="font-size:2rem;margin-bottom:0.75rem;">📊</div>
+          <div style="font-size:0.85rem;">Aucune donnée de prédiction disponible.<br>Effectuez votre premier diagnostic ci-dessus.</div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        top = session.sql("""
+            SELECT predicted_class, COUNT(*) as nb
+            FROM predictions GROUP BY predicted_class ORDER BY nb DESC LIMIT 1
+        """).collect()[0]
+        conf_moy = session.sql("""
+            SELECT ROUND(AVG(confidence)*100, 1) as moy FROM predictions
+        """).collect()[0]['MOY']
+        top_fr = CLASS_LABELS_FR_SHORT.get(top['PREDICTED_CLASS'], top['PREDICTED_CLASS'].upper())
 
-    col_k1, col_k2, col_k3 = st.columns(3)
-    with col_k1:
-        st.metric("Total diagnostics", f"{total:,}")
-    with col_k2:
-        st.metric("Pathologie dominante", top_fr)
-    with col_k3:
-        st.metric("Confiance moyenne", f"{conf_moy}%")
+        col_k1, col_k2, col_k3 = st.columns(3)
+        with col_k1:
+            st.metric("Total diagnostics", f"{total:,}")
+        with col_k2:
+            st.metric("Pathologie dominante", top_fr)
+        with col_k3:
+            st.metric("Confiance moyenne", f"{conf_moy}%")
 
-    st.markdown("<div style='margin-top:1.5rem'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='margin-top:1.5rem'></div>", unsafe_allow_html=True)
 
-    col6, col7 = st.columns([1, 1], gap="large")
+        col6, col7 = st.columns([1, 1], gap="large")
 
-    with col6:
-        st.markdown('<span class="section-label">Distribution des diagnostics</span>', unsafe_allow_html=True)
-        df_stats = session.sql("""
-            SELECT
-                predicted_class               AS Pathologie,
-                COUNT(*)                      AS Nb,
-                ROUND(AVG(confidence)*100, 1) AS Confiance_pct
-            FROM predictions
-            GROUP BY predicted_class
-            ORDER BY Nb DESC
-        """).to_pandas()
-        df_stats['Pathologie_FR'] = df_stats['PATHOLOGIE'].map(CLASS_LABELS_FR_SHORT)
+        with col6:
+            st.markdown('<span class="section-label">Distribution des diagnostics</span>', unsafe_allow_html=True)
+            df_stats = session.sql("""
+                SELECT
+                    predicted_class               AS Pathologie,
+                    COUNT(*)                      AS Nb,
+                    ROUND(AVG(confidence)*100, 1) AS Confiance_pct
+                FROM predictions
+                GROUP BY predicted_class
+                ORDER BY Nb DESC
+            """).to_pandas()
+            df_stats['PATHOLOGIE_FR'] = df_stats['PATHOLOGIE'].map(CLASS_LABELS_FR_SHORT)
 
-        bar_epi = alt.Chart(df_stats).mark_bar(
-            cornerRadiusTopRight=5, cornerRadiusBottomRight=5
-        ).encode(
-            x=alt.X('PATHOLOGIE_FR:N', title='', axis=alt.Axis(labelAngle=0)),
-            y=alt.Y('NB:Q', title='Diagnostics'),
-            color=alt.Color('PATHOLOGIE_FR:N',
-                            scale=alt.Scale(
-                                domain=['Asthme','Bronchite','BPCO','Sain','Pneumonie'],
-                                range=['#F59E0B','#6366F1','#F97316','#10B981','#EF4444']
-                            ),
-                            legend=None),
-            tooltip=[
-                alt.Tooltip('PATHOLOGIE_FR:N', title='Pathologie'),
-                alt.Tooltip('NB:Q', title='Cas'),
-                alt.Tooltip('CONFIANCE_PCT:Q', title='Confiance moy. (%)')
-            ]
-        ).properties(height=220)
+            bar_epi = alt.Chart(df_stats).mark_bar(
+                cornerRadiusTopRight=5, cornerRadiusBottomRight=5
+            ).encode(
+                x=alt.X('PATHOLOGIE_FR:N', title='', axis=alt.Axis(labelAngle=0)),
+                y=alt.Y('NB:Q', title='Diagnostics'),
+                color=alt.Color('PATHOLOGIE_FR:N',
+                                scale=alt.Scale(
+                                    domain=['Asthme','Bronchite','BPCO','Sain','Pneumonie'],
+                                    range=['#F59E0B','#6366F1','#F97316','#10B981','#EF4444']
+                                ),
+                                legend=None),
+                tooltip=[
+                    alt.Tooltip('PATHOLOGIE_FR:N', title='Pathologie'),
+                    alt.Tooltip('NB:Q', title='Cas'),
+                    alt.Tooltip('CONFIANCE_PCT:Q', title='Confiance moy. (%)')
+                ]
+            ).properties(height=220)
 
-        st.altair_chart(bar_epi, use_container_width=True)
+            st.altair_chart(bar_epi, use_container_width=True)
 
-    with col7:
-        st.markdown('<span class="section-label">10 dernières prédictions</span>', unsafe_allow_html=True)
-        df_recent = session.sql("""
-            SELECT
-                TO_CHAR(timestamp, 'DD/MM HH24:MI')  AS Heure,
-                pharmacie_id                          AS Pharmacie,
-                region                                AS Region,
-                filename                              AS Fichier,
-                predicted_class                       AS Diagnostic,
-                second_class                          AS Diag_2,
-                ROUND(second_prob * 100, 1)           AS Prob_2,
-                ROUND(confidence * 100, 1)            AS Confiance,
-                duration_sec                          AS Duree_sec,
-                sample_rate                           AS SampleRate,
-                file_size_bytes                       AS Taille_bytes
-            FROM predictions
-            ORDER BY timestamp DESC
-            LIMIT 10
-        """).to_pandas()
-        df_recent['DIAGNOSTIC'] = df_recent['DIAGNOSTIC'].map(lambda x: CLASS_LABELS_FR_SHORT.get(x, x))
-        df_recent['DIAG_2']     = df_recent['DIAG_2'].map(lambda x: CLASS_LABELS_FR_SHORT.get(x, x))
-        st.dataframe(df_recent, use_container_width=True, height=255)
+        with col7:
+            st.markdown('<span class="section-label">10 dernières prédictions</span>', unsafe_allow_html=True)
+            df_recent = session.sql("""
+                SELECT
+                    TO_CHAR(timestamp, 'DD/MM HH24:MI')  AS Heure,
+                    pharmacie_id                          AS Pharmacie,
+                    region                                AS Region,
+                    filename                              AS Fichier,
+                    predicted_class                       AS Diagnostic,
+                    second_class                          AS Diag_2,
+                    ROUND(second_prob * 100, 1)           AS Prob_2,
+                    ROUND(confidence * 100, 1)            AS Confiance,
+                    duration_sec                          AS Duree_sec,
+                    sample_rate                           AS SampleRate,
+                    file_size_bytes                       AS Taille_bytes
+                FROM predictions
+                ORDER BY timestamp DESC
+                LIMIT 10
+            """).to_pandas()
+            df_recent['DIAGNOSTIC'] = df_recent['DIAGNOSTIC'].map(lambda x: CLASS_LABELS_FR_SHORT.get(x, x))
+            df_recent['DIAG_2']     = df_recent['DIAG_2'].map(lambda x: CLASS_LABELS_FR_SHORT.get(x, x))
+            st.dataframe(df_recent, use_container_width=True, height=255)
