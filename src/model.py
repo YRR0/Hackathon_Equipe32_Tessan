@@ -16,6 +16,11 @@ from models.ResNet18FineTuned import ResNet18FineTuned
 
 from utils.melresnetdataset import MelResNetDataset
 
+    def unfreeze_last_block(self):
+        for param in self.backbone.layer4.parameters():
+            param.requires_grad = True
+        for param in self.backbone.fc.parameters():
+            param.requires_grad = True
 
 class ResNet18Trainer:
     """

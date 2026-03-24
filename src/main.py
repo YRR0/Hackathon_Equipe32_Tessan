@@ -1,15 +1,11 @@
 """
-Main d'execution pour preprocess, entrainement/evaluation et prediction.
-La logique d'apprentissage est centralisee dans ResNet18Trainer.
+Main dédié à la version ResNet18 fine-tunée sur Mel-spectrogrammes.
+Ne modifie pas le pipeline existant.
 """
 
 from pathlib import Path
-import numpy as np
-import torch
-import torch.nn.functional as F
-
 from preprocessing import Preprocessor
-from model import ResNet18Trainer, ResNet18FineTuned
+from model import ResNet18Trainer
 
 
 class MainResNet18:
@@ -147,6 +143,8 @@ class MainResNet18:
             "probabilities": {class_names[i]: float(probs[i]) for i in range(len(class_names))},
         }
 
+    # À lancer une première fois si spectres.npy n'existe pas encore
+    # app.preprocess()
 
 def main():
     app = MainResNet18()
