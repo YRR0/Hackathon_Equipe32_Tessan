@@ -341,6 +341,134 @@ class ResNet18Trainer:
 
         print(f"Modele ONNX exporte dans {model_file}")
 
+    def export_checkpoint_to_onnx(
+        self,
+        model_path="models/resnet18_mel_finetuned.pth",
+        onnx_path="models/resnet18_mel_finetuned.onnx",
+    ):
+        """Charge un checkpoint .pth et l'exporte en ONNX."""
+        self.load_data()
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = ResNet18FineTuned(
+            num_classes=len(self.le.classes_),
+            freeze_backbone=False,
+            tabular_dim=self.tabular_dim,
+        ).to(device)
+
+        model_file = Path(model_path)
+        if not model_file.is_absolute():
+            model_file = Path(__file__).resolve().parent / model_file
+
+        try:
+            state_dict = torch.load(model_file, map_location=device, weights_only=True)
+        except TypeError:
+            state_dict = torch.load(model_file, map_location=device)
+
+        model.load_state_dict(state_dict)
+        self.model = model
+        self.export_onnx(onnx_path=onnx_path)
+
+    def train_and_evaluate(
+        self,
+        epochs_head=5,
+        epochs_finetune=10,
+        model_path="models/resnet18_mel_finetuned.pth",
+        **train_kwargs,
+    ):
+        """Entrainer puis evaluer sur le split test (15%)."""
+        metrics = self.train(
+            epochs_head=epochs_head,
+            epochs_finetune=epochs_finetune,
+            save_model=True,
+            **train_kwargs,
+        )
+        print("Evaluation")
+        self.evaluate(model_path=model_path)
+        return metrics
+
+    def train_fixed_params_5fold(self, fixed_params=None, verbose_final_epochs=True):
+        """
+        Lance une CV 5-fold avec un set fige, puis un entrainement final
+        et une evaluation sur le test set.
+        """
+        if fixed_params is None:
+            fixed_params = {
+                "batch_size": 16,
+                "epochs_head": 5,
+                "epochs_finetune": 10,
+                "lr_head": 0.001,
+                "lr_finetune": 0.0001,
+                "weight_decay_head": 0.0,
+                "weight_decay_finetune": 0.0,
+                "use_class_weights": True,
+                "gaussian_noise_std": 0.01,
+                "time_shift_max": 12,
+                "pitch_shift_max": 4,
+                "num_time_masks": 1,
+                "num_freq_masks": 1,
+                "time_mask_max": 25,
+                "freq_mask_max": 6,
+                "cv_folds": 5,
+            }
+
+        cv_folds = fixed_params["cv_folds"]
+        train_params = {k: v for k, v in fixed_params.items() if k != "cv_folds"}
+        param_grid = {k: [v] for k, v in train_params.items()}
+
+        best, _ = self.grid_search(
+            param_grid=param_grid,
+            metric="best_val_acc",
+            maximize=True,
+            save_results=True,
+            results_path="models/resnet18_fixed_params_5fold_results.csv",
+            max_trials=1,
+            random_state=42,
+            cv_folds=cv_folds,
+            log_epochs=False,
+        )
+
+        print("Best configuration (fixed 5-fold):")
+        print(best)
+
+        print("\nEntrainement final avec les memes parametres...")
+        final_trainer = ResNet18Trainer(
+            batch_size=fixed_params["batch_size"],
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
+        )
+        final_trainer.train_aug_params.update(
+            {
+                "gaussian_noise_std": fixed_params["gaussian_noise_std"],
+                "time_shift_max": fixed_params["time_shift_max"],
+                "pitch_shift_max": fixed_params["pitch_shift_max"],
+                "num_time_masks": fixed_params["num_time_masks"],
+                "num_freq_masks": fixed_params["num_freq_masks"],
+                "time_mask_max": fixed_params["time_mask_max"],
+                "freq_mask_max": fixed_params["freq_mask_max"],
+            }
+        )
+
+        final_train_metrics = final_trainer.train(
+            epochs_head=fixed_params["epochs_head"],
+            epochs_finetune=fixed_params["epochs_finetune"],
+            save_model=True,
+            use_class_weights=fixed_params["use_class_weights"],
+            lr_head=fixed_params["lr_head"],
+            lr_finetune=fixed_params["lr_finetune"],
+            weight_decay_head=fixed_params["weight_decay_head"],
+            weight_decay_finetune=fixed_params["weight_decay_finetune"],
+            verbose_epochs=verbose_final_epochs,
+        )
+
+        print("\nEvaluation finale sur test set:")
+        final_trainer.evaluate(model_path="models/resnet18_mel_finetuned.pth")
+
+        return {
+            "cv_best": best,
+            "final_train": final_train_metrics,
+        }
+
     def train(
         self,
         epochs_head=5,
@@ -480,8 +608,6 @@ class ResNet18Trainer:
             model_file.parent.mkdir(parents=True, exist_ok=True)
             torch.save(self.model.state_dict(), model_file)
             self._log(f"{log_prefix}Modele sauvegarde dans {model_file}")
-
-            self.export_onnx(onnx_path="models/resnet18_mel_finetuned.onnx")
 
         return {
             "best_val_acc": best_val_acc,

@@ -1,12 +1,13 @@
 """
-Main dédié à la version ResNet18 fine-tunée sur Mel-spectrogrammes.
-Ne modifie pas le pipeline existant.
+Main d'execution pour preprocess, entrainement/evaluation et prediction.
+La logique d'apprentissage est centralisee dans ResNet18Trainer.
 """
 
 from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
+
 from preprocessing import Preprocessor
 from model import ResNet18Trainer, ResNet18FineTuned
 
@@ -21,17 +22,8 @@ class MainResNet18:
         preprocessor = Preprocessor(22050, 6, self.data_root, verbose=True)
         preprocessor.spectres_creation_and_save()
 
-    def training(self, batch_size=16, epochs_head=5, epochs_finetune=10):
-        trainer = ResNet18Trainer(batch_size=batch_size, num_workers=0, pin_memory=True)
-        trainer.train(epochs_head=epochs_head, epochs_finetune=epochs_finetune, save_model=True)
-        print("Evaluation")
-        trainer.evaluate(model_path="models/resnet18_mel_finetuned.pth")
-
     def evaluate_on_unseen_test(self, model_path="models/resnet18_mel_finetuned.pth"):
-        """
-        Evaluation uniquement sur le test set (15%) jamais vu pendant l'entrainement.
-        Split interne: 70% train / 15% val / 15% test.
-        """
+        """Evaluation sur le split test (15%) jamais vu en entrainement."""
         print("\n[EVAL] Evaluation sur test set jamais vu (15%)")
         trainer = ResNet18Trainer(batch_size=16, num_workers=0, pin_memory=True)
         trainer.load_data()
@@ -49,38 +41,34 @@ class MainResNet18:
     ):
         """
         Pipeline complete en une commande:
-        1) preprocess (regenere spectres.npy avec features tabulaires)
-        2) train + eval selon le mode choisi
-        3) export ONNX optionnel
+        1) preprocess (optionnel)
+        2) train + eval
+        3) export ONNX (optionnel)
         """
-        print("\n[PIPELINE] Step 1/3 - Preprocessing")
         if preproc:
+            print("\n[PIPELINE] Step 1/3 - Preprocessing")
             self.preprocess()
 
+        print("\n[PIPELINE] Step 2/3 - Training + Evaluation")
+        trainer = ResNet18Trainer(batch_size=batch_size, num_workers=0, pin_memory=True)
+
         if mode == "fixed_5fold":
-            print("\n[PIPELINE] Step 2/3 - Training (fixed 5-fold + final train)")
-            result = self.train_fixed_params_5fold()
+            result = trainer.train_fixed_params_5fold(verbose_final_epochs=True)
         elif mode == "standard":
-            print("\n[PIPELINE] Step 2/3 - Training (standard)")
-            self.training(
-                batch_size=batch_size,
+            result = trainer.train_and_evaluate(
                 epochs_head=epochs_head,
                 epochs_finetune=epochs_finetune,
+                verbose_epochs=True,
             )
-            result = {
-                "mode": "standard",
-                "batch_size": batch_size,
-                "epochs_head": epochs_head,
-                "epochs_finetune": epochs_finetune,
-            }
         else:
             raise ValueError("mode doit etre 'fixed_5fold' ou 'standard'")
 
         if export_final_onnx:
             print("\n[PIPELINE] Step 3/3 - ONNX export")
-            self.export_model_to_onnx(
+            exporter = ResNet18Trainer(batch_size=1, num_workers=0, pin_memory=False)
+            exporter.export_checkpoint_to_onnx(
                 model_path="models/resnet18_mel_finetuned.pth",
-                onnx_path="models/resnet18_mel_finetuned_final.onnx",
+                onnx_path="models/resnet18_mel_finetuned.onnx",
             )
 
         return result
@@ -148,7 +136,7 @@ class MainResNet18:
         top_idx = np.argsort(-probs)[:top_k]
 
         print(f"Prediction pour {wav_file.name}: {pred_label} ({pred_conf:.3f})")
-        print("Top probabilités:")
+        print("Top probabilites:")
         for i in top_idx:
             print(f"- {class_names[int(i)]}: {float(probs[int(i)]):.3f}")
 
@@ -159,181 +147,15 @@ class MainResNet18:
             "probabilities": {class_names[i]: float(probs[i]) for i in range(len(class_names))},
         }
 
-    def grid_search(self, cv_folds=5):
-        trainer = ResNet18Trainer(batch_size=32, num_workers=0, pin_memory=True)
-
-        param_grid = {
-            "batch_size": [16, 32],
-            "epochs_head": [5, 8],
-            "epochs_finetune": [10],
-            "lr_head": [1e-3, 5e-4],
-            "lr_finetune": [1e-4, 5e-5],
-            "weight_decay_head": [0.0, 1e-4],
-            "weight_decay_finetune": [0.0, 1e-4],
-            "use_class_weights": [True],
-            "gaussian_noise_std": [0.01],
-            "time_shift_max": [8, 12],
-            "pitch_shift_max": [2, 4],
-            "num_time_masks": [1, 2],
-            "num_freq_masks": [1, 2],
-            "time_mask_max": [15, 25],
-            "freq_mask_max": [6, 10],
-        }
-
-        best, _ = trainer.grid_search(
-            param_grid=param_grid,
-            metric="best_val_acc",
-            maximize=True,
-            save_results=True,
-            results_path="models/resnet18_grid_search_results.csv",
-            max_trials=24,
-            random_state=42,
-            cv_folds=cv_folds,
-        )
-        print("Best configuration:")
-        print(best)
-
-    def export_model_to_onnx(
-        self,
-        model_path="models/resnet18_mel_finetuned.pth",
-        onnx_path="models/resnet18_mel_finetuned.onnx",
-    ):
-        """
-        Exporte un checkpoint .pth vers ONNX.
-        """
-        trainer = ResNet18Trainer(batch_size=1, num_workers=0, pin_memory=False)
-        trainer.load_data()
-
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = ResNet18FineTuned(
-            num_classes=len(trainer.le.classes_),
-            freeze_backbone=False,
-            tabular_dim=trainer.tabular_dim,
-        ).to(device)
-
-        model_file = Path(model_path)
-        if not model_file.is_absolute():
-            model_file = Path(__file__).resolve().parent / model_file
-
-        try:
-            state_dict = torch.load(model_file, map_location=device, weights_only=True)
-        except TypeError:
-            state_dict = torch.load(model_file, map_location=device)
-
-        model.load_state_dict(state_dict)
-        trainer.model = model
-        trainer.export_onnx(onnx_path=onnx_path)
-
-        print(f"Export ONNX terminé: {onnx_path}")
-
-    def train_fixed_params_5fold(self):
-        """
-        Lance une CV 5-fold avec un set figé, puis un entraînement final
-        et une évaluation sur le test set.
-        """
-        fixed_params = {
-            "batch_size": 16,
-            "epochs_head": 5,
-            "epochs_finetune": 10,
-            "lr_head": 0.001,
-            "lr_finetune": 0.0001,
-            "weight_decay_head": 0.0,
-            "weight_decay_finetune": 0.0,
-            "use_class_weights": True,
-            "gaussian_noise_std": 0.01,
-            "time_shift_max": 12,
-            "pitch_shift_max": 4,
-            "num_time_masks": 1,
-            "num_freq_masks": 1,
-            "time_mask_max": 25,
-            "freq_mask_max": 6,
-            "cv_folds": 5,
-        }
-
-        trainer = ResNet18Trainer(
-            batch_size=fixed_params["batch_size"],
-            num_workers=0,
-            pin_memory=True,
-        )
-
-        cv_folds = fixed_params["cv_folds"]
-        train_params = {k: v for k, v in fixed_params.items() if k != "cv_folds"}
-        param_grid = {k: [v] for k, v in train_params.items()}
-
-        best, _ = trainer.grid_search(
-            param_grid=param_grid,
-            metric="best_val_acc",
-            maximize=True,
-            save_results=True,
-            results_path="models/resnet18_fixed_params_5fold_results.csv",
-            max_trials=1,
-            random_state=42,
-            cv_folds=cv_folds,
-            log_epochs=False,
-        )
-
-        print("Best configuration (fixed 5-fold):")
-        print(best)
-
-        print("\nEntraînement final avec les mêmes paramètres...")
-        final_trainer = ResNet18Trainer(
-            batch_size=fixed_params["batch_size"],
-            num_workers=0,
-            pin_memory=True,
-        )
-        final_trainer.train_aug_params.update({
-            "gaussian_noise_std": fixed_params["gaussian_noise_std"],
-            "time_shift_max": fixed_params["time_shift_max"],
-            "pitch_shift_max": fixed_params["pitch_shift_max"],
-            "num_time_masks": fixed_params["num_time_masks"],
-            "num_freq_masks": fixed_params["num_freq_masks"],
-            "time_mask_max": fixed_params["time_mask_max"],
-            "freq_mask_max": fixed_params["freq_mask_max"],
-        })
-
-        final_train_metrics = final_trainer.train(
-            epochs_head=fixed_params["epochs_head"],
-            epochs_finetune=fixed_params["epochs_finetune"],
-            save_model=True,
-            use_class_weights=fixed_params["use_class_weights"],
-            lr_head=fixed_params["lr_head"],
-            lr_finetune=fixed_params["lr_finetune"],
-            weight_decay_head=fixed_params["weight_decay_head"],
-            weight_decay_finetune=fixed_params["weight_decay_finetune"],
-            verbose_epochs=True,
-        )
-
-        self.export_model_to_onnx(
-            model_path="models/resnet18_mel_finetuned.pth",
-            onnx_path="models/resnet18_mel_finetuned_final.onnx",
-        )
-
-        print("\nÉvaluation finale sur test set:")
-        final_trainer.evaluate(model_path="models/resnet18_mel_finetuned.pth")
-
-        return {
-            "cv_best": best,
-            "final_train": final_train_metrics,
-        }
-
 
 def main():
     app = MainResNet18()
 
-    app.run_full_pipeline(mode="fixed_5fold", preproc=False, export_final_onnx=True)
+    app.run_full_pipeline(mode="fixed_5fold", preproc=True, export_final_onnx=True)
     # app.evaluate_on_unseen_test(model_path="models/resnet18_mel_finetuned.pth")
     # app.run_full_pipeline(mode="standard", batch_size=32, epochs_head=5, epochs_finetune=10)
-    # app.grid_search(cv_folds=5)
     # app.predict_file("../data/data_updated/Bronchial/P1BronchialSc_2.wav")
 
 
 if __name__ == "__main__":
     main()
-
-
-    # pas mal :
-    # {'batch_size': 16, 'epochs_head': 8, 'epochs_finetune': 15, 'lr_head': 0.0005, 'lr_finetune': 0.0001, 'weight_decay_head': 0.0, 'weight_decay_finetune': 0.0, 'use_class_weights': True, 'gaussian_noise_std': 0.0, 'time_shift_max': 8, 'pitch_shift_max': 2, 'num_time_masks': 2, 'num_freq_masks': 2, 'time_mask_max': 15, 'freq_mask_max': 10}
-
-    # hit 90 :
-    # {'batch_size': 16, 'epochs_head': 5, 'epochs_finetune': 15, 'lr_head': 0.001, 'lr_finetune': 0.0001, 'weight_decay_head': 0.0, 'weight_decay_finetune': 0.0, 'use_class_weights': True, 'gaussian_noise_std': 0.0, 'time_shift_max': 12, 'pitch_shift_max': 4, 'num_time_masks': 1, 'num_freq_masks': 1, 'time_mask_max': 25, 'freq_mask_max': 6}
-    
